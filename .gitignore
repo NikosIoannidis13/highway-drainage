@@ -1,0 +1,36 @@
+# Local environment and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python build products
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches and reports
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local project datasets and generated results (small tests/fixtures stay trackable)
+/data/
+/output/
+/results/
+*.log
+
+# Editor and operating-system files
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+Thumbs.db
+Desktop.ini
+.DS_Store

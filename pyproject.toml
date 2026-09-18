@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highway-drainage"
+version = "0.1.0"
+description = "Desktop terrain processing and highway-drainage catchment delineation"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "PySide6>=6.8,<7",
+    "ezdxf>=1.4,<2",
+    "pyproj>=3.7,<4",
+    "shapely>=2.1,<3",
+    "numpy>=2,<3",
+    "rasterio>=1.4,<2",
+    "pyflwdir>=0.5.12,<0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.11,<1",
+    "mypy>=1.15,<2",
+    "types-shapely>=2,<3",
+]
+# Candidate backend; adoption depends on terrain validation.
+triangulation = ["startinpy>=0.12,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --import-mode=importlib --strict-markers"
+markers = [
+    "unit: isolated domain/application behavior with in-memory collaborators",
+    "integration: real DXF/raster/hydrology adapters and generated temporary files",
+    "gui: PySide6 widgets, workers, and interaction through pytest-qt",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src", "tests"]
+strict = true
+
+# pytest-qt has no complete typing contract; contain this exception to the plugin.
+[[tool.mypy.overrides]]
+module = ["pytestqt.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["rasterio", "rasterio.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pyflwdir", "pyflwdir.*"]
+ignore_missing_imports = true
