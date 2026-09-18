@@ -2,6 +2,7 @@
 
 import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from highway_drainage.application.coordinates import ValidateCoordinates
@@ -14,10 +15,13 @@ from highway_drainage.infrastructure.cad_lines import CadLineReader
 from highway_drainage.infrastructure.coordinates import RasterCoordinateInspector
 from highway_drainage.infrastructure.crossings import ShapelyCrossings
 from highway_drainage.infrastructure.dxf import DxfTerrainReader
+from highway_drainage.infrastructure.earth_preview import KmzPreviewWriter
 from highway_drainage.infrastructure.hydrology import PyFlwdirHydrology
 from highway_drainage.infrastructure.outlets import RasterOutletSnapper
 from highway_drainage.infrastructure.preview import RasterPreviewReader
+from highway_drainage.infrastructure.project_raster import RasterProjectReader
 from highway_drainage.infrastructure.raster import GeoTiffWriter
+from highway_drainage.infrastructure.satellite import GoogleSatelliteBuilder
 from highway_drainage.infrastructure.surface import SurfaceBuilder
 from highway_drainage.infrastructure.terrain import TerrainNormalizer
 from highway_drainage.presentation.main_window import MainWindow
@@ -25,6 +29,7 @@ from highway_drainage.presentation.main_window import MainWindow
 
 def main() -> int:
     """Create the GUI and run its event loop."""
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName("Highway Drainage")
     validator = ValidateCoordinates(RasterCoordinateInspector())
@@ -36,6 +41,9 @@ def main() -> int:
         outlet_use_case=SelectOutlets(validator, RasterOutletSnapper()),
         hydrology_use_case=DelineateCatchments(PyFlwdirHydrology()),
         previews=RasterPreviewReader(),
+        project_rasters=RasterProjectReader(),
+        earth_writer=KmzPreviewWriter(),
+        satellite_builder=GoogleSatelliteBuilder(),
     )
     window.show()
     return app.exec()

@@ -27,6 +27,7 @@ from highway_drainage.domain.crossings import (
     ExtractedLines,
     LineSource,
 )
+from highway_drainage.infrastructure.cad_reference import cad_frame
 from highway_drainage.infrastructure.terrain import _projected_metres
 
 
@@ -98,24 +99,41 @@ class CadLineReader:
         cancel: Event,
     ) -> ExtractedLines:
         target = _projected_metres(working_crs)
-        transformer = Transformer.from_crs(
-            _projected_metres(source.crs), target, always_xy=True, allow_ballpark=False
-        )
         try:
             document = readfile(source.path)
         except (OSError, DXFError) as exc:
             raise ValueError(f"Cannot read {source.path.name}: {exc}") from exc
         file_ref = CadReference(source.path, "", "", "FILE")
         issues: list[CrossingIssue] = []
-        units = int(document.header.get("$INSUNITS", 0))
-        if units not in (0, 6):
-            raise ValueError(f"{source.path.name}: drawing XY units must be metres.")
-        if units == 0:
+        frame = cad_frame(document, source.path, source.crs, source.fallback_crs)
+        if frame.assumed:
+            issues.append(
+                CrossingIssue(
+                    "warning",
+                    "assumed_raster_crs",
+                    "DXF has no CRS metadata; assumed the project raster CRS.",
+                    file_ref,
+                )
+            )
+        transformer = Transformer.from_crs(frame.crs, target, always_xy=True, allow_ballpark=False)
+        metres_per_unit = frame.z_factor
+        if frame.matrix is not None:
+            origin = frame.matrix.transform(Vec3())
+            metres_per_unit = (
+                max(
+                    (frame.matrix.transform(axis) - origin).magnitude
+                    for axis in (Vec3(1, 0, 0), Vec3(0, 1, 0))
+                )
+                * frame.crs.axis_info[0].unit_conversion_factor
+            )
+        if not source.crs.strip():
+            source = LineSource(source.path, frame.crs.to_wkt(), source.layers)
+        if int(document.units) == 0:
             issues.append(
                 CrossingIssue(
                     "warning",
                     "unspecified_units",
-                    "Using the user's metre-based source CRS declaration.",
+                    "Drawing units unspecified: using source CRS linear units.",
                     file_ref,
                 )
             )
@@ -193,7 +211,9 @@ class CadLineReader:
                     continue
                 try:
                     vertices, closed, curved = _vertices(
-                        entity, tolerance / scale_bound, limits.max_curve_vertices
+                        entity,
+                        tolerance / (scale_bound * metres_per_unit),
+                        limits.max_curve_vertices,
                     )
                     cleaned: list[XY] = []
                     for i, vertex in enumerate(vertices):
@@ -207,6 +227,7 @@ class CadLineReader:
                             raise ValueError("Non-finite CAD coordinates.")
                         for matrix in reversed(matrices):
                             vertex = matrix.transform(vertex)
+                        vertex = frame.point(vertex)
                         x, y = transformer.transform(vertex.x, vertex.y, errcheck=True)
                         point = float(x), float(y)
                         if not all(isfinite(v) for v in point):
@@ -284,4 +305,4 @@ class CadLineReader:
                     file_ref,
                 )
             )
-        return ExtractedLines(tuple(lines), tuple(issues), target.to_wkt())
+        return ExtractedLines(tuple(lines), tuple(issues), target.to_wkt(), source)

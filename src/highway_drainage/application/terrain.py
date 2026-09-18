@@ -1,6 +1,6 @@
 """Coordinate terrain import without depending on Qt, ezdxf, or concrete adapters."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from math import isfinite
 from threading import Event
 from typing import Protocol
@@ -33,7 +33,12 @@ class ImportTerrain:
         self._reader = reader
         self._normalizer = normalizer
 
-    def execute(self, request: TerrainRequest, cancel: Event | None = None) -> TerrainDataset:
+    def execute(
+        self,
+        request: TerrainRequest,
+        cancel: Event | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> TerrainDataset:
         if not request.sources:
             raise ValueError("Select at least one DXF file.")
         if not request.vertical_reference.strip():
@@ -61,10 +66,18 @@ class ImportTerrain:
 
         token = cancel if cancel is not None else Event()
 
+        report = progress or (lambda _: None)
+
         def items() -> Iterable[TerrainFeature | ImportIssue]:
             for source in request.sources:
                 if token.is_set():
                     raise ImportCancelled()
-                yield from self._reader.read(source)
+                report(f"Reading terrain DXF: {source.path.name}")
+                for count, feature in enumerate(self._reader.read(source), start=1):
+                    if token.is_set():
+                        raise ImportCancelled()
+                    if count % 10000 == 0:
+                        report(f"Validating {source.path.name}: {count:,} entities read")
+                    yield feature
 
         return self._normalizer.normalize(request, items(), token)

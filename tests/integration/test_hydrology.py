@@ -136,7 +136,7 @@ def test_changed_grid_rejected_before_writing(tmp_path: Path) -> None:
 )
 def test_resource_guards(tmp_path: Path, limit: str) -> None:
     base = chain(tmp_path)
-    with pytest.raises(ValueError, match="resolution=.*DEM extent=.*coarser"):
+    with pytest.raises(ValueError, match="(?s)resolution=.*DEM extent=.*coarser"):
         service().execute(
             replace(
                 base,
@@ -171,3 +171,49 @@ def test_existing_output_not_overwritten(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="never overwritten"):
         service().execute(base)
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_confirmed_replacement_keeps_unrelated_files_and_removes_obsolete_masks(
+    tmp_path: Path,
+) -> None:
+    base = chain(tmp_path)
+    first = service().execute(base)
+    note = base.output / "survey_notes.txt"
+    note.write_text("keep", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in base.output.iterdir()}
+    replacement = replace(base, overwrite=True, minimum_accumulation_cells=4)
+    cancel = Event()
+
+    def stop(message: str) -> None:
+        if message.startswith("Delineating outlet"):
+            cancel.set()
+
+    with pytest.raises(ImportCancelled):
+        service().execute(replacement, cancel, stop)
+    assert {p.name: p.read_bytes() for p in base.output.iterdir()} == before
+    result = service().execute(replacement)
+    assert result.catchments[0].status == "rejected"
+    assert first.catchments[0].mask is not None and not first.catchments[0].mask.exists()
+    assert result.catchments[1].mask is not None and result.catchments[1].mask.exists()
+    assert note.read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".catchments.backup-*"))
+
+
+def test_publish_failure_restores_previous_catchments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = chain(tmp_path)
+    service().execute(base)
+    before = {p.name: p.read_bytes() for p in base.output.iterdir()}
+    original_rename = Path.rename
+
+    def fail_mid_publish(self: Path, target: str | Path) -> Path:
+        if self.parent.name == "result" and self.name == "flow_direction_d8.tif":
+            raise OSError("Simulated locked output")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_mid_publish)
+    with pytest.raises(OSError, match="locked"):
+        service().execute(replace(base, overwrite=True))
+    assert {p.name: p.read_bytes() for p in base.output.iterdir()} == before
+    assert not list(tmp_path.glob(".catchments.backup-*"))

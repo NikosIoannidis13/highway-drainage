@@ -56,8 +56,8 @@ class FindCrossings:
         for source in (request.highway, request.culverts):
             if source.path.suffix.lower() != ".dxf":
                 raise ValueError("Select a highway DXF and a culvert DXF.")
-            if not source.crs.strip() or not request.working_crs.strip():
-                raise ValueError("Declare both source CRSs and the projected working CRS.")
+            if not request.working_crs.strip():
+                raise ValueError("Load a project raster before computing crossings.")
         if token.is_set():
             raise ImportCancelled()
         report("Extracting highway linework…")

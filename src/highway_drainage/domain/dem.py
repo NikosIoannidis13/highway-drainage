@@ -32,6 +32,7 @@ class DemRequest:
     contour_spacing: float | None = None
     max_contour_edge: float | None = None
     sample_coverage: str = "boundary"
+    overwrite: bool = False
 
 
 @dataclass(frozen=True)

@@ -24,9 +24,14 @@ class NavigationView(QGraphicsView):
     def fit_data(self) -> None:
         """Fit all currently displayed geometry, leaving room to pan around it."""
         scene = self.scene()
-        if scene is None or not scene.items():
+        if scene is None:
             return
-        bounds = scene.itemsBoundingRect()
+        visible = [item for item in scene.items() if item.isVisible()]
+        if not visible:
+            return
+        bounds = visible[0].sceneBoundingRect()
+        for item in visible[1:]:
+            bounds = bounds.united(item.sceneBoundingRect())
         margin = max(bounds.width(), bounds.height(), 1.0) * 0.05
         bounds = bounds.adjusted(-margin, -margin, margin, margin)
         # A tight scene rectangle prevents dragging when the entire dataset fits.
@@ -41,7 +46,7 @@ class NavigationView(QGraphicsView):
         self.resetTransform()
         self._fit_scale = 1.0
         scene = self.scene()
-        if scene is not None and scene.items():
+        if scene is not None and any(item.isVisible() for item in scene.items()):
             self.fit_data()
         else:
             self.setSceneRect(0, 0, 1, 1)

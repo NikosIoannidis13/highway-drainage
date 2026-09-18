@@ -25,17 +25,31 @@ from highway_drainage.presentation.crossing_view import CrossingView
 class CrossingPanel(QWidget):
     find_requested = Signal()
     invalidated = Signal()
+    raster_requested = Signal(str)
 
     def __init__(self, view: CrossingView | None = None) -> None:
         super().__init__()
         self.result: CrossingResult | None = None
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        self.raster_path: Path | None = None
+        self.raster_label = QLabel("1. Load a DEM / GeoTIFF to set the project CRS")
+        self.raster_label.setWordWrap(True)
+        layout.addWidget(self.raster_label)
+        self.load_raster_button = QPushButton("Open ready raster TIFF?")
+        self.load_raster_button.clicked.connect(self._choose_raster)
+        layout.addWidget(self.load_raster_button)
+        self.source_form = QWidget()
+        form = QFormLayout(self.source_form)
+        self.source_form.setEnabled(False)
         self.highway_path = QLineEdit()
         self.culvert_path = QLineEdit()
-        self.highway_crs = QLineEdit()
-        self.culvert_crs = QLineEdit()
-        self.working_crs = QLineEdit()
+        self.highway_crs = QLineEdit(self)
+        self.highway_crs.hide()
+        self.culvert_crs = QLineEdit(self)
+        self.culvert_crs.hide()
+        self.working_crs = QLineEdit(self)
+        self.working_crs.setReadOnly(True)
+        self.working_crs.hide()
         self.highway_layers = QLineEdit()
         self.culvert_layers = QLineEdit()
         self.tolerance = QLineEdit("0.05")
@@ -43,23 +57,29 @@ class CrossingPanel(QWidget):
             ("Highway", self.highway_path, self.highway_crs, self.highway_layers),
             ("Culverts", self.culvert_path, self.culvert_crs, self.culvert_layers),
         ):
+            path.textChanged.connect(crs.clear)
             row = QHBoxLayout()
             row.addWidget(path, 3)
             browse = QPushButton("Browse…")
             browse.clicked.connect(lambda checked=False, field=path: self._choose_file(field))
             row.addWidget(browse)
             crs.setPlaceholderText("Source CRS code, e.g. 2100")
-            row.addWidget(crs, 1)
-            form.addRow(f"{label} DXF / CRS", row)
+            form.addRow(f"{label} DXF", row)
             layers.setPlaceholderText("Optional layer names separated by semicolons; blank = all")
             form.addRow(f"{label} layers", layers)
         self.working_crs.setPlaceholderText("Projected working CRS in metres, e.g. 2100")
-        form.addRow("Working CRS", self.working_crs)
+        form.addRow(
+            QLabel(
+                "All geometry is converted to the active raster CRS. "
+                "DXFs without CRS metadata are assumed to use the raster CRS."
+            )
+        )
         form.addRow("Curve approximation tolerance (m)", self.tolerance)
-        layout.addLayout(form)
+        layout.addWidget(self.source_form)
         controls = QHBoxLayout()
         self.find_button = QPushButton("Extract lines and find crossings")
         self.find_button.clicked.connect(self.find_requested)
+        self.find_button.setEnabled(False)
         fit = QPushButton("Fit view")
         controls.addWidget(self.find_button)
         controls.addWidget(fit)
@@ -108,9 +128,24 @@ class CrossingPanel(QWidget):
         ):
             field.textChanged.connect(self.invalidate)
 
+    def _choose_raster(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open project DEM", "", "GeoTIFF (*.tif *.tiff)"
+        )
+        if path:
+            self.raster_requested.emit(path)
+
+    def set_project_raster(self, path: Path, crs: str, label: str) -> None:
+        self.raster_path = path
+        self.working_crs.setText(crs)
+        self.raster_label.setText(f"DEM: {path.name}\nProject CRS: {label}")
+        self.source_form.setEnabled(True)
+        self.find_button.setEnabled(True)
+
     def _choose_file(self, field: QLineEdit) -> None:
         name, _ = QFileDialog.getOpenFileName(self, "Select DXF", "", "DXF files (*.dxf)")
         if name:
+            (self.highway_crs if field is self.highway_path else self.culvert_crs).clear()
             field.setText(name)
 
     def invalidate(self) -> None:
@@ -121,6 +156,10 @@ class CrossingPanel(QWidget):
         self.invalidated.emit()
 
     def request(self) -> CrossingRequest:
+        if self.raster_path is None:
+            raise ValueError(
+                "Load a project DEM / GeoTIFF before selecting highway and culvert inputs."
+            )
         if not self.highway_path.text().strip() or not self.culvert_path.text().strip():
             raise ValueError("Select both the highway DXF and the culvert DXF.")
         return CrossingRequest(
@@ -128,11 +167,13 @@ class CrossingPanel(QWidget):
                 Path(self.highway_path.text().strip()).resolve(),
                 self.highway_crs.text().strip(),
                 tuple(s.strip() for s in self.highway_layers.text().split(";") if s.strip()),
+                fallback_crs=self.working_crs.text().strip(),
             ),
             LineSource(
                 Path(self.culvert_path.text().strip()).resolve(),
                 self.culvert_crs.text().strip(),
                 tuple(s.strip() for s in self.culvert_layers.text().split(";") if s.strip()),
+                fallback_crs=self.working_crs.text().strip(),
             ),
             self.working_crs.text().strip(),
             float(self.tolerance.text()),

@@ -26,6 +26,7 @@ class CoordinatePanel(QWidget):
     validate_requested = Signal()
     snap_requested = Signal()
     invalidated = Signal()
+    raster_requested = Signal(str)
 
     def __init__(self, view: OutletView | None = None) -> None:
         super().__init__()
@@ -137,7 +138,7 @@ class CoordinatePanel(QWidget):
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select DEM", "", "GeoTIFF (*.tif *.tiff)")
         if path:
-            self.dem_path.setText(path)
+            self.raster_requested.emit(path)
 
     def invalidate(self) -> None:
         self.result = None

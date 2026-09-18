@@ -44,6 +44,7 @@ class LineSource:
     path: Path
     crs: str
     layers: tuple[str, ...] = ()  # empty means all modelspace layers
+    fallback_crs: str = ""  # Explicit project assumption for unreferenced CAD.
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class ExtractedLines:
     lines: tuple[CadLine, ...]
     issues: tuple[CrossingIssue, ...]
     crs_wkt: str
+    source: LineSource | None = None
 
 
 @dataclass(frozen=True)

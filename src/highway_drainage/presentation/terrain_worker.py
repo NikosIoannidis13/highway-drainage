@@ -12,6 +12,7 @@ class TerrainWorker(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
     finished = Signal()
+    progress = Signal(str)
 
     def __init__(self, use_case: ImportTerrain, request: TerrainRequest, cancel: Event) -> None:
         super().__init__()
@@ -22,7 +23,9 @@ class TerrainWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self.succeeded.emit(self._use_case.execute(self._request, self._cancel))
+            self.succeeded.emit(
+                self._use_case.execute(self._request, self._cancel, self.progress.emit)
+            )
         except ImportCancelled:
             self.failed.emit("Import cancelled.")
         except Exception as exc:

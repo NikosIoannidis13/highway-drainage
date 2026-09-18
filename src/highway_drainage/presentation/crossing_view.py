@@ -7,15 +7,19 @@ from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsPathItem,
+    QGraphicsPixmapItem,
 )
 
 from highway_drainage.domain.crossings import CrossingResult
+from highway_drainage.domain.preview import RasterPreview
 from highway_drainage.presentation.navigation_view import NavigationView
+from highway_drainage.presentation.raster_item import raster_item, raster_transform
 
 
 class CrossingView(NavigationView):
     coordinates_changed = Signal(str)
     point_selected = Signal(str)
+    data_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -29,6 +33,36 @@ class CrossingView(NavigationView):
         self.result: CrossingResult | None = None
         self.markers: dict[str, QGraphicsEllipseItem] = {}
         self._lines: dict[tuple[str, str], QGraphicsPathItem] = {}
+        self.snapshot: RasterPreview | None = None
+        self._raster_item: QGraphicsPixmapItem | None = None
+        self._raster_visible = False
+
+    def set_raster_visible(self, visible: bool) -> None:
+        """Change only the background visibility; keep cached data and overlays."""
+        self._raster_visible = visible
+        if self._raster_item is not None:
+            scene = self.scene()
+            assert scene is not None
+            was_empty = not any(item.isVisible() for item in scene.items())
+            self._raster_item.setVisible(visible)
+            if visible and was_empty:
+                self.fit_data()
+
+    def set_raster(self, snapshot: RasterPreview | None) -> None:
+        """Replace the cached background, without discarding engineering overlays."""
+        scene = self.scene()
+        assert scene is not None
+        if self._raster_item is not None:
+            scene.removeItem(self._raster_item)
+            self._raster_item = None
+        self.snapshot = snapshot
+        if snapshot is not None:
+            if self.result is None:
+                self._origin = (snapshot.affine[2], snapshot.affine[5])
+            self._raster_item = raster_item(snapshot, self._origin)
+            self._raster_item.setVisible(self._raster_visible)
+            scene.addItem(self._raster_item)
+        self.fit_data()
 
     @staticmethod
     def _pen(color: str, width: float = 1.5) -> QPen:
@@ -43,8 +77,11 @@ class CrossingView(NavigationView):
         self.markers.clear()
         self._lines.clear()
         self.result = None
+        self._raster_item = None
         scene.clear()
+        self.set_raster(self.snapshot)
         self.reset_view()
+        self.data_changed.emit()
 
     def show_result(self, result: CrossingResult) -> None:
         self.clear()
@@ -61,6 +98,8 @@ class CrossingView(NavigationView):
             min(p[1] for p in coordinates),
         )
         ox, oy = self._origin
+        if self._raster_item is not None and self.snapshot is not None:
+            self._raster_item.setTransform(raster_transform(self.snapshot, self._origin))
         for category, lines, color in (
             ("h", result.highways, "#1768ac"),
             ("c", result.culverts, "#d97706"),
@@ -91,6 +130,8 @@ class CrossingView(NavigationView):
             scene.addItem(marker)
             self.markers[point.identifier] = marker
         self.fit_data()
+
+        self.data_changed.emit()
 
     def highlight(self, identifier: str) -> None:
         if self.result is None:

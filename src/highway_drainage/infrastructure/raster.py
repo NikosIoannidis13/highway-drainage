@@ -1,4 +1,4 @@
-"""Bounded cell-centre interpolation and atomic, non-overwriting GeoTIFF export."""
+"""Bounded interpolation and staged GeoTIFF export with explicit overwrite consent."""
 
 import os
 from collections.abc import Callable
@@ -184,7 +184,9 @@ class GeoTiffWriter:
                 raise ImportCancelled()
             # Windows rename refuses an existing destination, including one created
             # after preflight. On POSIX use link to retain that no-overwrite guarantee.
-            if os.name == "nt":
+            if request.overwrite:
+                os.replace(temporary, request.output)
+            elif os.name == "nt":
                 os.rename(temporary, request.output)
             else:
                 os.link(temporary, request.output)

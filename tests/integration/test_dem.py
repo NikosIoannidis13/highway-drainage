@@ -18,6 +18,26 @@ from tests.support.dem import dem_service, plane
 from tests.support.terrain_input import document, load, save
 
 
+def test_confirmed_dem_replacement_preserves_previous_file_until_success(tmp_path: Path) -> None:
+    request = DemRequest(plane(tmp_path), tmp_path / "replace.tif")
+    dem_service().execute(request)
+    before = request.output.read_bytes()
+    cancel = Event()
+
+    def stop(message: str) -> None:
+        if message.startswith("Writing DEM: 1/"):
+            cancel.set()
+
+    replacement = replace(request, overwrite=True, cell_size=2)
+    with pytest.raises(ImportCancelled):
+        dem_service().execute(replacement, cancel, stop)
+    assert request.output.read_bytes() == before
+    dem_service().execute(replacement)
+    with rasterio.open(request.output) as src:
+        assert src.shape == (2, 2)
+    assert not list(tmp_path.glob(".*.part.tif"))
+
+
 def test_preserved_triangles_and_planar_geotiff(tmp_path: Path) -> None:
     dataset = plane(tmp_path)
     request = DemRequest(dataset, tmp_path / "dem.tif")

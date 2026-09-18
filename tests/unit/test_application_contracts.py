@@ -9,7 +9,12 @@ import pytest
 
 from highway_drainage.application.coordinates import CoordinateInspector, ValidateCoordinates
 from highway_drainage.application.dem import plan_dem
-from highway_drainage.application.hydrology import DelineateCatchments, HydrologyEngine
+from highway_drainage.application.hydrology import (
+    DelineateCatchments,
+    HydrologyEngine,
+    check_hydrology_budget,
+    with_large_dem_limits,
+)
 from highway_drainage.application.outlets import OutletSnapper, SelectOutlets
 from highway_drainage.application.terrain import (
     ImportCancelled,
@@ -188,3 +193,29 @@ def test_cancelled_hydrology_never_calls_engine(prepared: SnapResult) -> None:
     with pytest.raises(ImportCancelled):
         DelineateCatchments(engine).execute(HydrologyRequest(prepared, Path("unused")), cancel)
     engine.delineate.assert_not_called()
+
+
+def test_reported_large_dem_passes_large_budget_only(prepared: SnapResult) -> None:
+    request = HydrologyRequest(prepared, Path("unused"))
+    extent = (585964.777306399, 3915131.97249573, 594601.777306399, 3918842.97249573)
+    with pytest.raises(ValueError) as exc:
+        check_hydrology_budget(request, 32_051_907, 20, 1.0, extent)
+    diagnostic = str(exc.value)
+    for label in ("cells:", "memory bytes:", "cell/outlet visits:", "output bytes:"):
+        assert label in diagnostic
+    larger = with_large_dem_limits(request)
+    report = check_hydrology_budget(larger, 32_051_907, 20, 1.0, extent)
+    assert "5964.9 MiB memory" in report
+    assert "641,038,140 cell/outlet visits" in report
+    assert larger.prepared is request.prepared
+    assert larger.minimum_accumulation_cells == request.minimum_accumulation_cells
+    assert request.max_cells == 2_000_000
+
+
+@pytest.mark.parametrize("cells,outlets", [(50_000_001, 1), (32_051_907, 100)])
+def test_large_profile_still_rejects_excessive_work(
+    prepared: SnapResult, cells: int, outlets: int
+) -> None:
+    request = with_large_dem_limits(HydrologyRequest(prepared, Path("unused")))
+    with pytest.raises(ValueError, match="Exceeded limits"):
+        check_hydrology_budget(request, cells, outlets, 1.0, (0, 0, 100, 100))

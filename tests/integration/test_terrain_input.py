@@ -164,8 +164,8 @@ def test_mixed_crs_and_vertical_units_are_normalized(tmp_path: Path) -> None:
     assert result.crs_wkt
 
 
-@pytest.mark.parametrize("crs", ["", "not a crs", "EPSG:4326", "EPSG:2263"])
-def test_unknown_geographic_and_nonmetre_crs_are_rejected(tmp_path: Path, crs: str) -> None:
+@pytest.mark.parametrize("crs", ["", "not a crs", "EPSG:4326"])
+def test_unknown_and_geographic_source_crs_are_rejected(tmp_path: Path, crs: str) -> None:
     doc = document()
     source = replace(save(doc, tmp_path / "crs.dxf"), crs=crs)
     with pytest.raises((ValueError, RuntimeError)):

@@ -15,6 +15,8 @@ def test_gui_hydrology_run_and_source_invalidation(qtbot: QtBot, tmp_path: Path)
     window.coordinate_panel.snap_result = base.prepared
     panel = window.hydrology_panel
     panel.output.setText(str(base.output))
+    panel.resource_profile.setCurrentText("Large DEM")
+    assert panel.request(base.prepared).max_cells == 50_000_000
     panel.run_button.click()
     qtbot.waitUntil(lambda: panel.isEnabled(), timeout=120000)
     assert panel.result is not None

@@ -17,10 +17,7 @@ from highway_drainage.domain.terrain import (
     TerrainFeature,
     TerrainSource,
 )
-
-
-def _point(value: Vec3) -> Point3D:
-    return Point3D(float(value.x), float(value.y), float(value.z))
+from highway_drainage.infrastructure.cad_reference import cad_frame
 
 
 class DxfTerrainReader:
@@ -30,21 +27,33 @@ class DxfTerrainReader:
         except (OSError, DXFError) as exc:
             raise ValueError(f"Cannot read {source.path.name}: {exc}") from exc
         file_ref = EntityReference(source.path, "", "", "FILE")
-        # This first implementation accepts metre-based drawing XY only.
-        units = int(document.header.get("$INSUNITS", 0))
-        if units not in (0, 6):
+        frame = cad_frame(document, source.path, source.crs, source.fallback_crs)
+        if frame.assumed:
             yield ImportIssue(
-                "error",
-                "drawing_units",
-                "DXF drawing units must be metres or unspecified.",
+                "warning",
+                "assumed_raster_crs",
+                "DXF has no CRS metadata; assumed the project raster CRS.",
                 file_ref,
             )
-            return
-        if units == 0:
+        z_scale = frame.z_factor if source.z_unit == "auto" else 1.0
+
+        def point(value: Vec3) -> Point3D:
+            converted = frame.point(value)
+            return Point3D(converted.x, converted.y, value.z * z_scale)
+
+        if int(document.units) == 0:
             yield ImportIssue(
                 "warning",
                 "unspecified_units",
-                "DXF units are unspecified; using the user's metre-based CRS declaration.",
+                "Drawing units unspecified: using source CRS units for XY and automatic Z.",
+                file_ref,
+            )
+        elif int(document.units) != 6:
+            yield ImportIssue(
+                "info",
+                "drawing_units",
+                "Drawing units converted to source CRS units; "
+                f"automatic Z factor={frame.z_factor:g} m.",
                 file_ref,
             )
         for entity in document.modelspace():
@@ -52,7 +61,7 @@ class DxfTerrainReader:
                 source.path, str(entity.dxf.handle), str(entity.dxf.layer), entity.dxftype()
             )
             if isinstance(entity, Face3d):
-                vertices = tuple(_point(entity[index]) for index in range(4))
+                vertices = tuple(point(entity[index]) for index in range(4))
                 # DXF stores a triangular face by repeating its third vertex.
                 if vertices[2] == vertices[3]:
                     vertices = vertices[:3]
@@ -70,13 +79,13 @@ class DxfTerrainReader:
                     continue
                 yield TerrainFeature(
                     ref,
-                    tuple(_point(v) for v in entity.points()),
+                    tuple(point(v) for v in entity.points()),
                     closed=bool(entity.is_closed),
                     role=role,
                 )
             elif isinstance(entity, Line):
                 yield TerrainFeature(
-                    ref, (_point(entity.dxf.start), _point(entity.dxf.end)), role=role
+                    ref, (point(entity.dxf.start), point(entity.dxf.end)), role=role
                 )
             else:
                 yield ImportIssue(

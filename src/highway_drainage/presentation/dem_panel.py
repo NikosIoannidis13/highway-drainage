@@ -57,7 +57,7 @@ class DemPanel(QWidget):
         browse = QPushButton("Choose GeoTIFF…")
         browse.clicked.connect(self._choose_output)
         output_row.addWidget(browse)
-        form.addRow("New output file", output_row)
+        form.addRow("Output file", output_row)
         layout.addLayout(form)
         note = QLabel(
             "Use terrain samples for XYZ polylines with varying elevations; "
@@ -67,7 +67,7 @@ class DemPanel(QWidget):
             "Existing triangles are preserved. Linework reconstruction requires one boundary and "
             "breaklines forming closed, noded regions. Default limits: 100 million cells, "
             "5 million vertices, 10 million triangles and 24 GiB estimated working memory. "
-            "Existing output files are not overwritten."
+            "Replacing an existing output requires confirmation."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -77,7 +77,7 @@ class DemPanel(QWidget):
         layout.addStretch()
 
     def _choose_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "New DEM output", "", "GeoTIFF (*.tif *.tiff)")
+        path, _ = QFileDialog.getSaveFileName(self, "DEM output", "", "GeoTIFF (*.tif *.tiff)")
         if path:
             self.output.setText(path)
 
@@ -89,7 +89,7 @@ class DemPanel(QWidget):
                 raise ValueError("Extent requires four numbers: xmin, ymin, xmax, ymax.")
             extent = values[0], values[1], values[2], values[3]
         if not self.output.text().strip():
-            raise ValueError("Choose a new GeoTIFF output filename.")
+            raise ValueError("Choose a GeoTIFF output filename.")
         return DemRequest(
             dataset,
             Path(self.output.text().strip()),

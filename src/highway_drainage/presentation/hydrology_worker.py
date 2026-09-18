@@ -37,7 +37,9 @@ class HydrologyWorker(QObject):
             self.succeeded.emit(result)
             if self._previews is not None and not self._cancel.is_set():
                 try:
+                    self.progress.emit("Preparing catchment boundaries for preview...")
                     self.boundaries_ready.emit(self._previews.boundaries(result, self._cancel))
+                    self.progress.emit("Catchment preview ready in Drainage View.")
                 except ImportCancelled:
                     pass
                 except Exception as exc:

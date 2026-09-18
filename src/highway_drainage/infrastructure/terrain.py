@@ -18,6 +18,7 @@ from highway_drainage.domain.terrain import (
     TerrainFeature,
     TerrainRequest,
 )
+from highway_drainage.infrastructure.cad_reference import resolve_source_crs, source_crs
 
 type VertexKey = tuple[float, float, float]
 type GeometryKey = tuple[bool, bool, tuple[VertexKey, ...]]
@@ -71,16 +72,28 @@ class TerrainNormalizer:
     def normalize(
         self, request: TerrainRequest, items: Iterable[TerrainFeature | ImportIssue], cancel: Event
     ) -> TerrainDataset:
-        target = _projected_metres(request.working_crs)
+        resolved_sources = []
+        for source in request.sources:
+            if cancel.is_set():
+                raise ImportCancelled()
+            resolved_sources.append(
+                replace(
+                    source,
+                    crs=resolve_source_crs(source.path, source.crs, source.fallback_crs).to_wkt(),
+                )
+            )
+        resolved = tuple(resolved_sources)
+        request = replace(request, sources=resolved)
+        target = _projected_metres(request.working_crs or resolved[0].crs)
         transforms: dict[object, Transformer] = {}
         scales: dict[object, float] = {}
         for source in request.sources:
-            if source.z_unit not in ("m", "ft"):
+            if source.z_unit not in ("auto", "m", "ft"):
                 raise ValueError("Z units must be m or international ft.")
             transforms[source.path] = Transformer.from_crs(
-                _projected_metres(source.crs), target, always_xy=True, allow_ballpark=False
+                source_crs(source.crs), target, always_xy=True, allow_ballpark=False
             )
-            scales[source.path] = 1.0 if source.z_unit == "m" else 0.3048
+            scales[source.path] = 1.0 if source.z_unit in ("m", "auto") else 0.3048
 
         features: list[TerrainFeature] = []
         issues: list[ImportIssue] = []
@@ -224,4 +237,5 @@ class TerrainNormalizer:
             request.vertical_reference,
             tuple(features),
             tuple(issues),
+            f"{target.to_string()} ? {target.name}",
         )

@@ -185,10 +185,12 @@ class GenerateDem:
             raise ImportCancelled()
         if request.output.suffix.lower() not in (".tif", ".tiff"):
             raise ValueError("Choose a .tif or .tiff output file.")
-        if request.output.exists():
+        if request.output.exists() and not request.overwrite:
             raise ValueError(
                 "Output already exists. Choose a new filename; existing files are preserved."
             )
+        if request.output.is_dir() or request.output.is_symlink():
+            raise ValueError("Choose a regular GeoTIFF output file, not a directory or link.")
         if not request.output.parent.is_dir():
             raise ValueError("The output directory does not exist.")
         report(plan.describe())

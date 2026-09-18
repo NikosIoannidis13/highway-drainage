@@ -137,6 +137,6 @@ class ShapelyCrossings:
             tuple(points),
             tuple(issues),
             request.curve_tolerance,
-            request.highway,
-            request.culverts,
+            highways.source or request.highway,
+            culverts.source or request.culverts,
         )

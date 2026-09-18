@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QTabWidget
 from pytestqt.qtbot import QtBot
 
 from highway_drainage.presentation.main_window import MainWindow
+from tests.support.coordinates import raster
 from tests.support.crossings import crossing_service, request_for
 from tests.support.dem import dem_service, plane
 from tests.support.terrain_input import TRIANGLE, document, save, service
@@ -34,6 +35,8 @@ def test_multiple_file_selection_and_background_import(qtbot: QtBot, tmp_path: P
     window = MainWindow(service())
     qtbot.addWidget(window)
     window.working_crs.setText("2100")
+    for source in (a, b):
+        source.path.with_suffix(".prj").write_text("EPSG:2100")
     window.add_files([str(a.path), str(b.path), str(a.path)])
     assert window.sources.rowCount() == 2
     window.show()
@@ -41,7 +44,8 @@ def test_multiple_file_selection_and_background_import(qtbot: QtBot, tmp_path: P
     qtbot.waitUntil(lambda: window.inputs.isEnabled(), timeout=10000)
     assert window.dataset is not None
     assert len(window.dataset.sources) == 2
-    assert window.dataset.sources[0].crs == "2100"
+    assert "2100" in window.dataset.sources[0].crs
+    assert window.sources.isColumnHidden(1)
     assert window.dataset.vertical_reference == "Survey elevations as supplied"
     assert not hasattr(window, "vertical_reference")
     assert len(window.dataset.features) == 1
@@ -68,6 +72,7 @@ def test_gui_dem_export_and_resource_diagnostic(qtbot: QtBot, tmp_path: Path) ->
     window = MainWindow(service(), dem_use_case=dem_service())
     qtbot.addWidget(window)
     window.working_crs.setText("EPSG:32634")
+    dataset.sources[0].path.with_suffix(".prj").write_text("EPSG:32634")
     window.add_files([str(dataset.sources[0].path)])
     window.show()
     window.import_button.click()
@@ -105,7 +110,7 @@ def test_crossing_map_table_selection_and_invalidation(qtbot: QtBot, tmp_path: P
     panel.culvert_path.setText(str(request.culverts.path))
     panel.highway_crs.setText("EPSG:32634")
     panel.culvert_crs.setText("EPSG:32634")
-    panel.working_crs.setText("EPSG:32634")
+    panel.set_project_raster(raster(tmp_path), "EPSG:32634", "EPSG:32634")
     window.show()
     panel.find_button.click()
     qtbot.waitUntil(lambda: panel.isEnabled(), timeout=10000)
@@ -137,7 +142,7 @@ def test_crossing_failure_restores_controls(qtbot: QtBot, tmp_path: Path) -> Non
     panel.culvert_path.setText(str(tmp_path / "missing_culvert.dxf"))
     panel.highway_crs.setText("EPSG:32634")
     panel.culvert_crs.setText("EPSG:32634")
-    panel.working_crs.setText("EPSG:32634")
+    panel.set_project_raster(raster(tmp_path), "EPSG:32634", "EPSG:32634")
     panel.find_button.click()
     qtbot.waitUntil(lambda: panel.isEnabled(), timeout=10000)
     assert "Cannot read" in window.status.text()

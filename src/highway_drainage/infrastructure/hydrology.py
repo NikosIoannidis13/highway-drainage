@@ -12,9 +12,11 @@ import numpy as np
 import numpy.typing as npt
 import rasterio
 
+from highway_drainage.application.hydrology import check_hydrology_budget
 from highway_drainage.application.terrain import ImportCancelled
 from highway_drainage.domain.hydrology import CatchmentResult, HydrologyRequest, HydrologyResult
 from highway_drainage.domain.outlets import SnapMode
+from highway_drainage.infrastructure.result_files import publish_results
 from highway_drainage.infrastructure.terrain import _projected_metres
 
 
@@ -32,10 +34,12 @@ class PyFlwdirHydrology:
         from pyflwdir.dem import fill_depressions
 
         output = request.output.resolve()
-        if output.exists():
+        if output.exists() and not request.overwrite:
             raise ValueError(
-                "Choose a new output directory; existing results are never overwritten."
+                "Existing results are never overwritten without confirmation."
             )
+        if output.exists() and not output.is_dir():
+            raise ValueError("The catchment output path must be a directory.")
         prepared = request.prepared
         audit = prepared.validation
         with (
@@ -72,20 +76,7 @@ class PyFlwdirHydrology:
                 )
             cells = source.width * source.height
             count = sum(o.pour_point is not None for o in prepared.outlets)
-            memory = 96 * 1024**2 + cells * 192
-            disk = cells * (25 + count)
-            if (
-                cells > request.max_cells
-                or memory > request.max_memory_bytes
-                or cells * max(1, count) > request.max_cell_visits
-                or disk > request.max_output_bytes
-            ):
-                raise ValueError(
-                    f"Hydrology estimates {cells:,} cells, {memory / 1024**2:.1f} MiB memory, "
-                    f"{disk / 1024**2:.1f} MiB output, {count} outlets; "
-                    f"resolution={transform.a:g} m, DEM extent={audit.dem.bounds}. "
-                    "Use a coarser DEM, fewer outlets, or a smaller hydrologically complete extent."
-                )
+            progress(check_hydrology_budget(request, cells, count, transform.a, audit.dem.bounds))
             _check(cancel)
             progress("Reading DEM; preserving NoData boundaries.")
             values = source.read(1, masked=True, out_dtype="float64")
@@ -284,5 +275,5 @@ class PyFlwdirHydrology:
                 json.dumps(manifest, default=str, indent=2), encoding="utf-8"
             )
             _check(cancel)
-            stage.rename(output)
+            publish_results(stage, output, request.overwrite, audit.dem.path)
         return result

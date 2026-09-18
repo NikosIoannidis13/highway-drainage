@@ -1,9 +1,10 @@
 """Terrain input forms and reporting; all engineering work runs in the use case."""
 
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import Qt, QThread, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -27,15 +29,19 @@ from PySide6.QtWidgets import (
 from highway_drainage.application.coordinates import ValidateCoordinates
 from highway_drainage.application.crossings import FindCrossings
 from highway_drainage.application.dem import GenerateDem
+from highway_drainage.application.earth_preview import EarthPreview, EarthPreviewWriter
 from highway_drainage.application.hydrology import DelineateCatchments
 from highway_drainage.application.outlets import SelectOutlets
 from highway_drainage.application.preview import PreviewReader
+from highway_drainage.application.project_raster import ProjectRaster, ProjectRasterReader
+from highway_drainage.application.satellite import SatelliteBuilder, SatelliteRequest
 from highway_drainage.application.terrain import ImportTerrain
 from highway_drainage.domain.coordinates import CoordinateReport, CoordinateRequest
 from highway_drainage.domain.crossings import CrossingResult
 from highway_drainage.domain.dem import DemResult
 from highway_drainage.domain.hydrology import HydrologyResult
 from highway_drainage.domain.outlets import SnapResult
+from highway_drainage.domain.preview import RasterPreview
 from highway_drainage.domain.terrain import LineRole, TerrainDataset, TerrainRequest, TerrainSource
 from highway_drainage.presentation.coordinate_panel import CoordinatePanel
 from highway_drainage.presentation.coordinate_worker import CoordinateWorker
@@ -43,10 +49,14 @@ from highway_drainage.presentation.crossing_panel import CrossingPanel
 from highway_drainage.presentation.crossing_worker import CrossingWorker
 from highway_drainage.presentation.dem_panel import DemPanel
 from highway_drainage.presentation.dem_worker import DemWorker
+from highway_drainage.presentation.earth_launcher import open_google_earth
+from highway_drainage.presentation.earth_worker import EarthPreviewWorker
 from highway_drainage.presentation.hydrology_panel import HydrologyPanel
 from highway_drainage.presentation.hydrology_worker import HydrologyWorker
 from highway_drainage.presentation.outlet_worker import OutletWorker
 from highway_drainage.presentation.preview_panel import PreviewPanel
+from highway_drainage.presentation.raster_worker import RasterWorker
+from highway_drainage.presentation.task_progress import TaskProgress
 from highway_drainage.presentation.terrain_worker import TerrainWorker
 
 _SUPPLIED_ELEVATIONS = "Survey elevations as supplied"
@@ -65,6 +75,9 @@ class MainWindow(QMainWindow):
         outlet_use_case: SelectOutlets | None = None,
         hydrology_use_case: DelineateCatchments | None = None,
         previews: PreviewReader | None = None,
+        project_rasters: ProjectRasterReader | None = None,
+        earth_writer: EarthPreviewWriter | None = None,
+        satellite_builder: SatelliteBuilder | None = None,
     ) -> None:
         super().__init__(parent)
         self._use_case = use_case
@@ -74,14 +87,20 @@ class MainWindow(QMainWindow):
         self._outlet_use_case = outlet_use_case
         self._hydrology_use_case = hydrology_use_case
         self._previews = previews
+        self._project_rasters = project_rasters
+        self._earth_writer = earth_writer
+        self.active_raster: ProjectRaster | None = None
+        self._task_failed = False
         self._thread: QThread | None = None
         self._worker: (
-            TerrainWorker
+            RasterWorker
+            | TerrainWorker
             | DemWorker
             | CrossingWorker
             | CoordinateWorker
             | OutletWorker
             | HydrologyWorker
+            | EarthPreviewWorker
             | None
         ) = None
         self._cancel = Event()
@@ -91,15 +110,30 @@ class MainWindow(QMainWindow):
         self.resize(1100, 800)
         root = QWidget()
         layout = QVBoxLayout(root)
+        raster_row = QHBoxLayout()
+        self.open_raster_button = QPushButton("Open existing DEM / GeoTIFF?")
+        self.open_raster_button.clicked.connect(self._choose_raster)
+        self.open_raster_button.setEnabled(project_rasters is not None)
+        raster_row.addWidget(self.open_raster_button)
+        self.project_label = QLabel(
+            "Project CRS: load a raster, or import georeferenced terrain first"
+        )
+        self.project_label.setWordWrap(True)
+        raster_row.addWidget(self.project_label, 1)
+        layout.addLayout(raster_row)
         self.inputs = QWidget()
         form_layout = QVBoxLayout(self.inputs)
         form = QFormLayout()
-        self.working_crs = QLineEdit()
+        self.working_crs = QLineEdit(self)
+        self.working_crs.setReadOnly(True)
+        self.working_crs.hide()
         self.working_crs.setPlaceholderText("Projected CRS in metres, e.g. 2100")
-        form.addRow("Working CRS", self.working_crs)
         form_layout.addLayout(form)
         form_layout.addWidget(
-            QLabel("Enter each drawing's CRS code, e.g. 2100. XY units must be metres.")
+            QLabel(
+                "CRS comes from the active raster. DXF metadata and units are read automatically. "
+                "DXFs without CRS metadata use the raster CRS. Known drawing units are converted."
+            )
         )
         buttons = QHBoxLayout()
         add = QPushButton("Add DXF files…")
@@ -114,7 +148,8 @@ class MainWindow(QMainWindow):
             ["DXF file", "Source CRS", "Z units", "Linework role"]
         )
         self.sources.horizontalHeader().setStretchLastSection(True)
-        self.sources.setColumnWidth(0, 430)
+        self.sources.setColumnWidth(0, 230)
+        self.sources.setColumnHidden(1, True)
         form_layout.addWidget(self.sources)
         form_layout.addWidget(
             QLabel(
@@ -142,9 +177,20 @@ class MainWindow(QMainWindow):
         self.export_panel.setEnabled(False)
         self.export_panel.export_requested.connect(self._start_export)
         self.preview = PreviewPanel()
+        self.preview.show_satellite.setEnabled(satellite_builder is not None)
+        self.preview.satellite_view.builder = satellite_builder
+        self._satellite_timer = QTimer(self)
+        self._satellite_timer.setSingleShot(True)
+        self._satellite_timer.setInterval(50)
+        self._satellite_timer.timeout.connect(self._refresh_satellite)
+        self.preview.satellite_update_requested.connect(self._satellite_timer.start)
+        self.preview.satellite_view.idle.connect(self._satellite_idle)
+        self.preview.earth_button.setEnabled(earth_writer is not None)
+        self.preview.earth_button.clicked.connect(self._start_earth_preview)
         self.crossing_panel = CrossingPanel(self.preview.drainage_view)
         self.crossing_panel.setEnabled(crossing_use_case is not None)
         self.crossing_panel.find_requested.connect(self._start_crossings)
+        self.crossing_panel.raster_requested.connect(self.load_raster)
         self.coordinate_panel = CoordinatePanel(self.preview.drainage_view)
         self.coordinate_panel.setEnabled(coordinate_use_case is not None)
         self.coordinate_panel.validate_requested.connect(self._start_coordinates)
@@ -183,6 +229,8 @@ class MainWindow(QMainWindow):
         self.cancel_button = QPushButton("Cancel operation")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel_import)
+        self.task_progress = TaskProgress()
+        layout.addWidget(self.task_progress)
         layout.addWidget(self.cancel_button)
         self.status = QLabel("Select DXF files and declare their coordinate reference and roles.")
         self.status.setWordWrap(True)
@@ -197,8 +245,74 @@ class MainWindow(QMainWindow):
         self.working_crs.textChanged.connect(self._invalidate)
         self.coordinate_panel.invalidated.connect(self._invalidate_drainage_preview)
         self.coordinate_panel.dem_path.textChanged.connect(self.preview.clear_terrain)
+        self.coordinate_panel.raster_requested.connect(self.load_raster)
+        self.coordinate_panel.dem_path.setReadOnly(True)
         self.hydrology_panel.output.textChanged.connect(self.preview.clear_boundaries)
         self.hydrology_panel.minimum_cells.textChanged.connect(self.preview.clear_boundaries)
+
+    def _begin_task(self) -> None:
+        self._task_failed = False
+        self.open_raster_button.setEnabled(False)
+        self.preview.earth_button.setEnabled(False)
+        self.hydrology_panel.setEnabled(False)
+        self.task_progress.begin(self.status.text())
+
+    def _choose_raster(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open elevation raster", "", "GeoTIFF (*.tif *.tiff)"
+        )
+        if path:
+            self.load_raster(path)
+
+    @Slot(str)
+    def load_raster(self, path: str) -> None:
+        if self._thread is not None or self._project_rasters is None:
+            return
+        for panel in (
+            self.inputs,
+            self.export_panel,
+            self.crossing_panel,
+            self.coordinate_panel,
+            self.hydrology_panel,
+        ):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText("Reading raster metadata and terrain preview?")
+        self._cancel = Event()
+        thread = QThread(self)
+        worker = RasterWorker(self._project_rasters, Path(path), self._cancel)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._show_project_raster)
+        worker.failed.connect(self._show_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
+
+    @Slot(object)
+    def _show_project_raster(self, raster: ProjectRaster) -> None:
+        self.active_raster = raster
+        self.dataset = None
+        self.export_panel.setEnabled(False)
+        self.working_crs.blockSignals(True)
+        self.working_crs.setText(raster.crs)
+        self.working_crs.blockSignals(False)
+        self.crossing_panel.set_project_raster(raster.path, raster.crs, raster.crs_label)
+        self.crossing_panel.invalidate()
+        self.coordinate_panel.dem_path.setText(str(raster.path))
+        self.coordinate_panel.invalidate()
+        self.hydrology_panel.invalidate()
+        self.preview.clear_boundaries()
+        self.preview.show_raster(raster.preview)
+        self.preview.mode.setCurrentIndex(0)
+        self.project_label.setText(f"Project CRS: {raster.crs_label}")
+        self.status.setText(
+            f"Loaded {raster.path.name}. Ready for DXF crossings and outlet preparation."
+        )
 
     @Slot()
     def _invalidate_drainage_preview(self) -> None:
@@ -215,7 +329,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def _invalidate(self) -> None:
         self.dataset = None
-        self.preview.clear_terrain()
+        if self.active_raster is None:
+            self.preview.clear_terrain()
         self.export_panel.setEnabled(False)
         self.report.clear()
         self.status.setText("Inputs changed. Import again to validate.")
@@ -247,9 +362,9 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(str(path))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.sources.setItem(row, 0, item)
-            self.sources.setItem(row, 1, QTableWidgetItem(self.working_crs.text()))
+            self.sources.setItem(row, 1, QTableWidgetItem(""))
             units = QComboBox()
-            units.addItems(["m", "ft"])
+            units.addItems(["auto", "m", "ft"])
             units.currentTextChanged.connect(self._invalidate)
             self.sources.setCellWidget(row, 2, units)
             self.sources.setCellWidget(row, 3, self._role_combo())
@@ -301,6 +416,7 @@ class MainWindow(QMainWindow):
                     self._choice(self.sources, row, 2),
                     LineRole(self._choice(self.sources, row, 3)),
                     overrides,
+                    fallback_crs=self.working_crs.text().strip(),
                 )
                 for row in range(self.sources.rowCount())
             ),
@@ -316,6 +432,7 @@ class MainWindow(QMainWindow):
         self._cancel = Event()
         thread = QThread(self)
         worker = TerrainWorker(self._use_case, request, self._cancel)
+        worker.progress.connect(self._dem_progress)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._show_result)
@@ -325,14 +442,20 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
 
     @Slot(object)
     def _show_result(self, dataset: TerrainDataset) -> None:
         self.dataset = dataset
+        if self.active_raster is None:
+            self.working_crs.blockSignals(True)
+            self.working_crs.setText(dataset.crs_wkt)
+            self.working_crs.blockSignals(False)
+            self.project_label.setText(f"Project CRS: {dataset.crs_label} (from imported terrain)")
         self.preview.terrain_info.setText(
             f"{len(dataset.sources)} terrain DXFs; {len(dataset.features)} features; "
-            f"{len(dataset.issues)} findings.\nCRS: {dataset.crs_wkt}\n"
+            f"{len(dataset.issues)} findings.\nCRS: {dataset.crs_label}\n"
             "Export a DEM for raster preview."
         )
         faces = sum(feature.is_face for feature in dataset.features)
@@ -357,6 +480,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _show_error(self, message: str) -> None:
+        self._task_failed = True
         self.status.setText(message)
         self.report.appendPlainText(message)
 
@@ -366,6 +490,10 @@ class MainWindow(QMainWindow):
             return
         try:
             request = self.export_panel.request(self.dataset)
+            if request.output.exists():
+                if not self._confirm_overwrite(request.output, directory=False):
+                    return
+                request = replace(request, overwrite=True)
         except ValueError as exc:
             self._show_error(str(exc))
             return
@@ -378,7 +506,7 @@ class MainWindow(QMainWindow):
         self._cancel = Event()
         thread = QThread(self)
         worker = DemWorker(self._dem_use_case, request, self._cancel, self._previews)
-        worker.raster_ready.connect(self.preview.show_raster)
+        worker.raster_ready.connect(self._show_generated_preview)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._show_dem_result)
@@ -389,17 +517,35 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
+
+    @Slot(object)
+    def _show_generated_preview(self, preview: RasterPreview) -> None:
+        if self.dataset is not None:
+            self.active_raster = ProjectRaster(
+                preview.path, self.dataset.crs_wkt, self.dataset.crs_label, preview
+            )
+        self.preview.show_raster(preview)
 
     @Slot(str)
     def _dem_progress(self, message: str) -> None:
+        self.task_progress.update_message(message)
         self.status.setText(message)
         if not message.startswith("Writing DEM"):
             self.report.appendPlainText(message)
 
     @Slot(object)
     def _show_dem_result(self, result: DemResult) -> None:
+        # Replacing a TIFF can change its grid without changing the path text.
+        self.coordinate_panel.invalidate()
+        self.preview.clear_terrain()
         self.coordinate_panel.dem_path.setText(str(result.output))
+        if self.dataset is not None:
+            self.crossing_panel.set_project_raster(
+                result.output, self.dataset.crs_wkt, self.dataset.crs_label
+            )
+            self.project_label.setText(f"Project CRS: {self.dataset.crs_label} (generated DEM)")
         self.status.setText(f"Exported {result.valid_cells:,} valid cells to {result.output}")
         self.report.appendPlainText(f"GeoTIFF complete: {result.output}\n{result.plan.describe()}")
 
@@ -407,6 +553,8 @@ class MainWindow(QMainWindow):
     def _start_crossings(self) -> None:
         if self._crossing_use_case is None or self._thread is not None:
             return
+        if self.active_raster is not None:
+            self.crossing_panel.working_crs.setText(self.active_raster.crs)
         try:
             request = self.crossing_panel.request()
         except ValueError as exc:
@@ -433,6 +581,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
 
     @Slot(object)
@@ -488,6 +637,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
 
     @Slot(object)
@@ -531,6 +681,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
 
     @Slot(object)
@@ -550,17 +701,21 @@ class MainWindow(QMainWindow):
     def _start_hydrology(self) -> None:
         if self._hydrology_use_case is None or self._thread is not None:
             return
-        self.hydrology_panel.invalidate()
-        self.preview.clear_boundaries()
         prepared = self.coordinate_panel.snap_result
         if prepared is None:
             self._show_error("Prepare pour points before catchment delineation.")
             return
         try:
             request = self.hydrology_panel.request(prepared)
+            if request.output.exists():
+                if not self._confirm_overwrite(request.output, directory=True):
+                    return
+                request = replace(request, overwrite=True)
         except ValueError as exc:
             self._show_error(str(exc))
             return
+        self.hydrology_panel.invalidate()
+        self.preview.clear_boundaries()
         for panel in (
             self.inputs,
             self.export_panel,
@@ -585,7 +740,27 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._thread, self._worker = thread, worker
+        self._begin_task()
         thread.start()
+
+    def _confirm_overwrite(self, path: Path, *, directory: bool) -> bool:
+        description = (
+            "Generated catchment results in this folder will be replaced. "
+            "Obsolete catchment masks from the previous run will be removed. "
+            "Unrelated files will be kept."
+            if directory
+            else "The existing GeoTIFF will be replaced."
+        )
+        return (
+            QMessageBox.warning(
+                self,
+                "Overwrite existing results?",
+                f"{path.resolve()}\n\n{description}\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
 
     @Slot(object)
     def _show_hydrology(self, result: HydrologyResult) -> None:
@@ -600,6 +775,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _finished(self) -> None:
+        self.task_progress.finish(self._task_failed)
+        self.open_raster_button.setEnabled(self._project_rasters is not None)
+        self.preview.earth_button.setEnabled(self._earth_writer is not None)
         self._thread = None
         self._worker = None
         self.inputs.setEnabled(True)
@@ -608,8 +786,100 @@ class MainWindow(QMainWindow):
         self.hydrology_panel.setEnabled(self._hydrology_use_case is not None)
         self.export_panel.setEnabled(self.dataset is not None and self._dem_use_case is not None)
         self.cancel_button.setEnabled(False)
+        self._satellite_timer.start()
         if self._closing:
             self.close()
+
+    @Slot()
+    def _start_earth_preview(self) -> None:
+        if self._earth_writer is None or self._thread is not None:
+            return
+        crossings = self.crossing_panel.result
+        crs = (
+            self.active_raster.crs
+            if self.active_raster
+            else (crossings.crs_wkt if crossings else "")
+        )
+        raster = (
+            self.preview.terrain_view.snapshot
+            if self.preview.mode.currentIndex() == 0
+            or self.preview.show_raster_background.isChecked()
+            else None
+        )
+        if not crs or (crossings is None and raster is None and self.preview.boundaries is None):
+            self._show_error("Load a raster or compute crossings before opening Google Earth.")
+            return
+        snapshot = EarthPreview(
+            crs, crossings, self.coordinate_panel.snap_result, self.preview.boundaries, raster
+        )
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Google Earth preview",
+            str(
+                self.active_raster.path.with_suffix(".kmz")
+                if self.active_raster
+                else Path("highway-drainage.kmz")
+            ),
+            "Google Earth KMZ (*.kmz)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".kmz":
+            path = path.with_suffix(".kmz")
+        overwrite = path.exists()
+        if (
+            overwrite
+            and QMessageBox.warning(
+                self,
+                "Overwrite existing KMZ?",
+                f"{path}\n\nThe existing KMZ will be replaced after export succeeds. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        for panel in (self.inputs, self.export_panel, self.crossing_panel, self.coordinate_panel):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText("Preparing Google Earth preview from current results...")
+        self._cancel = Event()
+        thread = QThread(self)
+        worker = EarthPreviewWorker(
+            self._earth_writer, snapshot, path, self._cancel, overwrite=overwrite
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._open_earth_preview)
+        worker.failed.connect(self._show_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
+
+    @Slot(object)
+    def _open_earth_preview(self, path: Path) -> None:
+        if self._closing or self._cancel.is_set():
+            return
+        if open_google_earth(path):
+            self.status.setText(
+                "KMZ export complete. Launch requested in a separate Google Earth Pro window. "
+                "If no window appears, open Google Earth Pro and use File > Open. "
+                f"Local KMZ: {path}"
+            )
+        else:
+            self.status.setText(f"Google Earth preview saved: {path}")
+            QMessageBox.information(
+                self,
+                "Open Google Earth preview",
+                f"The KMZ was saved but could not be opened automatically.\n\n{path}\n\n"
+                "Open it using File > Open in Google Earth Pro.",
+            )
 
     @Slot()
     def _cancel_import(self) -> None:
@@ -617,9 +887,44 @@ class MainWindow(QMainWindow):
         self.status.setText("Cancelling after the current read, geometry operation or raster tile…")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._satellite_timer.stop()
         if self._thread is not None:
             self._closing = True
             self._cancel_import()
             event.ignore()
+        elif not self.preview.satellite_view.shutdown():
+            self._closing = True
+            event.ignore()
         else:
             super().closeEvent(event)
+
+    @Slot()
+    def _satellite_idle(self) -> None:
+        if self._closing:
+            self.close()
+
+    @Slot()
+    def _refresh_satellite(self) -> None:
+        if self._closing or not self.preview.show_satellite.isChecked():
+            return
+        crossings = self.crossing_panel.result
+        crs = (
+            self.active_raster.crs
+            if self.active_raster
+            else (crossings.crs_wkt if crossings else "")
+        )
+        if not crs:
+            self.preview.satellite_view.clear_layers()
+            return
+        terrain_mode = self.preview.mode.currentIndex() == 0
+        raster = self.preview.terrain_view.snapshot
+        preview = EarthPreview(
+            crs,
+            None if terrain_mode else crossings,
+            None if terrain_mode else self.coordinate_panel.snap_result,
+            None if terrain_mode else self.preview.boundaries,
+            raster if terrain_mode or self.preview.show_raster_background.isChecked() else None,
+        )
+        self.preview.satellite_view.submit(
+            SatelliteRequest(preview, raster, "terrain" if terrain_mode else "drainage")
+        )

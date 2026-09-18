@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from highway_drainage.application.hydrology import with_large_dem_limits
 from highway_drainage.domain.hydrology import HydrologyRequest, HydrologyResult
 from highway_drainage.domain.outlets import SnapResult
 
@@ -35,7 +37,9 @@ class HydrologyPanel(QWidget):
         layout.addWidget(note)
         form = QFormLayout()
         self.output = QLineEdit()
-        self.output.setPlaceholderText("New directory for this run (must not already exist)")
+        self.output.setPlaceholderText(
+            "Results directory (confirm before replacing existing results)"
+        )
         row = QHBoxLayout()
         row.addWidget(self.output)
         browse = QPushButton("Choose parent folder...")
@@ -44,6 +48,13 @@ class HydrologyPanel(QWidget):
         form.addRow("Output directory", row)
         self.minimum_cells = QLineEdit("1")
         form.addRow("Minimum contributing cells at outlet", self.minimum_cells)
+        self.resource_profile = QComboBox()
+        self.resource_profile.addItems(["Standard", "Large DEM"])
+        self.resource_profile.setToolTip(
+            "Large DEM: 50 million cells, 12 GiB estimated memory, 4 GiB estimated output, "
+            "2 billion cell/outlet visits. These are limits, not a guarantee of available RAM."
+        )
+        form.addRow("Processing budget", self.resource_profile)
         layout.addLayout(form)
         self.run_button = QPushButton("Delineate catchments")
         self.run_button.clicked.connect(self.run_requested)
@@ -53,6 +64,7 @@ class HydrologyPanel(QWidget):
         layout.addWidget(self.report)
         self.output.textChanged.connect(self.invalidate)
         self.minimum_cells.textChanged.connect(self.invalidate)
+        self.resource_profile.currentIndexChanged.connect(self.invalidate)
 
     def _browse(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose output parent directory")
@@ -61,9 +73,12 @@ class HydrologyPanel(QWidget):
 
     def request(self, prepared: SnapResult) -> HydrologyRequest:
         if not self.output.text().strip():
-            raise ValueError("Choose a new hydrology output directory.")
-        return HydrologyRequest(
+            raise ValueError("Choose a hydrology output directory.")
+        request = HydrologyRequest(
             prepared, Path(self.output.text().strip()), float(self.minimum_cells.text())
+        )
+        return (
+            with_large_dem_limits(request) if self.resource_profile.currentIndex() == 1 else request
         )
 
     def invalidate(self) -> None:

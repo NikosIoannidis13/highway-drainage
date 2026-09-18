@@ -19,17 +19,63 @@ interrupted; cancellation is checked between files and entities.
 
 ## Shared previews
 
+For satellite imagery **inside the preview panel**, tick **Google satellite imagery**.
+Enter a Google Maps JavaScript API key in the local setup field and click **Connect**.
+Enable the Maps JavaScript API and billing in that key's Google Cloud project. Restrict
+the key to the Maps JavaScript API and the website `http://127.0.0.1:8765/*`.
+Google usage charges may apply; see [Google's API setup guide](https://developers.google.com/maps/documentation/javascript/get-api-key).
+The fixed loopback port is used only to serve the in-memory map page; it does not expose
+project files. Close another instance using that port if the map page cannot start.
+
+The embedded map uses Google's official satellite map type and retains Google's
+attribution. Terrain View shows the cached DEM overlay. Drainage View shows highways,
+culverts, original crossings, snapped outlets and catchments; its DEM overlay follows
+**Show raster background**. Zoom, pan, extents and reset work in the map, with a separate
+camera for each logical view. Uncheck **Google satellite imagery** to return to the
+ordinary offline preview. Existing engineering results are reused.
+
+The key is kept for the session unless **Remember key on this computer** is selected;
+that option stores it in the current user's Qt settings (not in the repository).
+Alternatively set `HIGHWAY_DRAINAGE_GOOGLE_MAPS_KEY` in your local environment. Key,
+billing and network errors are displayed in the map. No API key is bundled. Qt WebEngine
+is supplied by the existing PySide6 dependency; no extra package installation is needed.
+
+**Open Google Earth Pro (separate window)** opens the current preview layers in Google Earth
+Pro application (install Pro if it is not already available). It creates a local KMZ
+snapshot with folders for highways, culverts, geometric crossings, snapped outlets,
+and available catchment boundaries. Coordinates are converted from the project CRS
+to WGS84 longitude/latitude. Catchment holes and disconnected areas are preserved;
+simplified preview boundaries remain labelled as such.
+
+From Terrain View, the KMZ includes the DEM display image. From Drainage View, it
+includes that image only when **Show raster background** is checked. The cached image
+is reprojected for display; no full DEM is loaded and no hydrology is rerun. Google
+Earth supplies its own imagery and ground elevation beneath these overlays.
+
+The export runs in a worker with progress/cancellation. A Save dialog lets you choose
+the KMZ filename and folder. Existing files are replaced only after a warning is
+confirmed and the new export completes successfully. The saved path is shown in the status message. If
+automatic launch is unavailable, open that file using **File > Open** in Google Earth
+Pro. This is an external Google Earth preview, not an embedded satellite view. No API
+key or new Python dependency is required. Implementation follows Google's
+[KML reference](https://developers.google.com/kml/documentation/kmlreference).
+
 Use the single **Terrain View / Drainage View** selector above the main preview.
 The workflow forms remain in scrollable tabs beside it, and the splitter adjusts
 space between forms and preview. Only one preview scene is visible at a time.
 
 - **Terrain View** shows a georeferenced elevation image plus filename, CRS,
   raster dimensions, bounds, pixel steps, sampled elevation range, units and NoData.
-  It fills after DEM export, coordinate validation or outlet preparation. Before
+  It fills when opening an existing DEM / GeoTIFF, after DEM export, coordinate
+  validation or outlet preparation. Before
   a DEM is available, terrain import supplies source/feature counts and datum information.
 - **Drainage View** shares one scene between the crossing and outlet forms: blue
   highway lines, orange culverts, red geometric crossings, green snapped centers,
-  grey containing pixels, and purple catchment boundaries. Table/map selection
+  grey containing pixels, and purple catchment boundaries. **Show raster background**
+  adds the loaded georeferenced raster underneath; it is off by default and affects
+  Drainage View only. The choice persists while changing views, refreshing results,
+  or loading another TIFF during the session. Hidden raster extents are excluded
+  from zoom to extents. Table/map selection
   remains linked. Catchment holes and separate components are retained.
 
 DEM display snapshots and mask outlines load in existing worker threads when a
@@ -53,10 +99,15 @@ selects its table row; dragging over a marker pans without selecting or recenter
 All navigation behavior lives in presentation code (`navigation_view.py`).
 
 The DEM image is capped at 768 pixels on its longest side; its reported elevation
-range is sampled, not a full-raster statistic. NoData is transparent. Exact mask
-outlines are capped at 250,000 vertices and 100 million total input cells (2 million
-per mask). If a boundary limit is reached, the preview explicitly reports omitted
-masks; the engineering outputs remain complete. Preview errors are reported without
+range is sampled, not a full-raster statistic. NoData is transparent. Catchments
+appear automatically as purple outlines with translucent fill over the raster.
+Masks above 2 million cells use a coarser display grid, read in strips; any contributing
+cell keeps its display cell visible, so tiny catchments are retained. A shared
+250,000-vertex budget further coarsens complex outlines instead of skipping later
+outlets. Simplified boundaries are labelled: small holes and gaps may disappear and
+edges may expand by a display cell. Exported masks and computed areas remain at full
+resolution. Small masks retain exact boundaries where the vertex budget permits.
+Preview errors are reported without
 discarding successful engineering results. Changing input data clears affected
 snapshots; changing snapping settings retains the original crossing geometry.
 
@@ -66,14 +117,35 @@ The selector and two persistent views live in `presentation/preview_panel.py`.
 The [Qt stacked-widget API](https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QStackedWidget.html)
 provides visibility switching; no new dependencies or desktop framework were added.
 
+## Existing rasters and task progress
+
+**Open existing DEM / GeoTIFF** is available above the tabs. Loading reads metadata
+and a bounded preview in a worker; it never modifies the source TIFF. It requires a
+single elevation band, a valid affine transform and a projected metre CRS. Reproject
+geographic/foot-based rasters in GIS first; a missing CRS must be assigned correctly.
+Hydrology additionally requires square north-up pixels. The raster's Z units remain
+as supplied; DXF unit conversion does not alter imported raster elevations.
+
+All worker tasks show an animated Qt progress indicator and elapsed time. Known
+counts (such as DEM tiles or prepared triangles) show real progress. Unknown-duration
+reads, triangulation and compiled flow operations remain indeterminate rather than
+showing a fabricated percentage. A `tqdm` console companion is enabled when a terminal
+is attached. Cancel requests are honored at the next supported checkpoint; native
+library operations cannot always stop immediately.
+
 ## Terrain input workflow
 
-1. Enter the working projected CRS code (metre-based XY), for example `2100`.
-   The `EPSG:` prefix is optional in working and source CRS fields.
+1. Use **Open existing DEM / GeoTIFF** to load a local single-band elevation raster.
+   Its projected metre CRS becomes the project CRS, displayed read-only above the tabs.
+   You can proceed directly to crossings and outlets without constructing terrain.
+   To create a DEM from scratch, import terrain first; its detected/declarable source
+   CRS establishes the initial metre CRS until the generated raster is available.
 2. Use **Add DXF files** to select one or more files.
-3. Verify each source CRS, Z units (`m` or international `ft`), and linework role.
-   Source CRS initially copies the working CRS for convenience; verify it against
-   survey records. A DXF CRS is never inferred from coordinate magnitudes.
+3. Select the linework role. Source CRS is detected from supported DXF GEODATA or a
+   same-name `.prj` file. When that metadata is absent, the drawing is assumed to
+   use the loaded raster CRS, and this assumption is recorded in the findings.
+   There are no DXF source-setting controls. Z units default to `auto`,
+   following the drawing units; `m` and international `ft` override Z only.
 4. Optionally add exact, case-sensitive layer role overrides. These apply to all
    selected files and override each file's default linework role.
 5. Select **Import and validate terrain** and inspect the findings.
@@ -92,12 +164,17 @@ be simple. The importer never joins separate LINE entities or closes open chains
 Layer roles affect linework only, not 3DFACE surface entities. Modelspace is imported;
 paperspace is not a terrain source. Ignored/unsupported entities receive findings.
 
-Coordinates are extracted in drawing WCS, transformed from the declared source CRS
-to the working CRS using explicit XY axis order, and retained in immutable domain
-objects. Both CRSs must be projected with metre-based horizontal units. Known DXF
-`$INSUNITS` values other than metres are rejected; unspecified units produce a warning
-and rely on the user's declaration. Local engineering grids need a separately
-established CRS/transformation and are not georeferenced merely by assigning a label.
+Coordinates are extracted in drawing WCS. Supported GEODATA placement is applied,
+then coordinates are transformed into the raster's project CRS with explicit X/Y
+axis order. Project CRS units must be metres. Projected source CRSs may use feet or
+other linear units. Known DXF `$INSUNITS` values (including feet, US survey feet,
+inches, millimetres and centimetres) are converted into the source CRS units before
+reprojection. This avoids scaling a foot-based CRS twice. Auto Z is converted to
+metres separately. Missing drawing units produce a warning and use the declared or
+detected source CRS units; no unit system is inferred from coordinate magnitude.
+With no source metadata, the raster CRS is used as the source assumption. This
+cannot detect or correct a drawing in a different, unidentified CRS. Conflicting
+metadata and unsupported GEODATA transformations produce actionable errors. Local engineering grids still need proper georeferencing.
 Z units are normalized to metres. GUI imports record `Survey elevations as supplied` automatically; no vertical-reference
 field needs filling in. No vertical datum transformation or inferred elevation offset
 is performed.
@@ -126,12 +203,13 @@ faces require the modeling rules below. Input files are never modified.
 ## Terrain models and GeoTIFF export
 
 After importing terrain, open the **DEM / GeoTIFF** tab. Set the cell size, optional
-extent, NoData, elevation units and a new output filename, then select **Build terrain
+extent, NoData, elevation units and an output filename, then select **Build terrain
 and export GeoTIFF**. The job runs in a worker thread; progress and resource diagnostics
 appear in the report. Cancellation is cooperative between geometry operations/tiles.
 
-The export uses the imported projected working CRS. To change it, reimport with the
-new working CRS so coordinates are transformed, rather than relabelling a raster.
+The export uses the active raster CRS, or the initial imported terrain CRS when
+creating the first raster. Loading a different raster clears stale terrain,
+crossings, outlet selections and catchments before another computation.
 Output elevations may be metres or international feet; the vertical datum is unchanged.
 
 Two model paths are selected from the actual input:
@@ -170,8 +248,9 @@ may expand by less than a cell. Both requested and actual extents are reported.
 No grid resampling occurs during writing.
 
 Exports are written to a temporary file in the destination directory and published
-only when complete. Existing files are never overwritten, including files that appear
-after preflight. Failed or cancelled jobs remove their temporary raster. An extent
+only when complete. Replacing an existing file requires a warning-dialog confirmation
+(Cancel is the default). Without confirmation, files that appear after preflight are
+also protected. Failed or cancelled jobs preserve the old TIFF and remove their temporary raster. An extent
 with no valid cell centres fails instead of publishing an empty DEM.
 
 ### Library choices
@@ -221,9 +300,11 @@ generation and raster export, not to arbitrary-sized DXF parsing.
 ## Highway / culvert crossings
 
 Open the **Highway / culvert crossings** tab, select a highway DXF and a culvert DXF,
-and declare each source CRS and the projected working CRS. All horizontal CRS units
-must be metres, consistently with terrain input. The drawing's `$INSUNITS` must be
-metres or unspecified (reported). Optional, case-insensitive layer filters use
+and first select **Open ready raster TIFF** at the top of that tab. Highway/culvert
+inputs are enabled after the raster loads. Its CRS is displayed read-only. DXF CRS
+metadata is used when available; otherwise the raster CRS is assumed. All working horizontal CRS units
+must be metres. Source drawing units are converted before reprojection, as in
+terrain input. Optional, case-insensitive layer filters use
 semicolon-separated names. Select the intended alignment/centreline layers; the
 software does not infer which road edge or culvert symbol is hydraulically relevant.
 
@@ -325,8 +406,8 @@ the machine's execution policy is unnecessary.
 
 | Group | Packages | Setup stage |
 | --- | --- | --- |
-| Runtime | PySide6, ezdxf, pyproj, shapely, numpy, rasterio, pyflwdir | Installed |
-| Development (`dev`) | pytest, pytest-qt, ruff, mypy, types-shapely | Installed |
+| Runtime | PySide6, ezdxf, pyproj, shapely, numpy, rasterio, pyflwdir, tqdm | Installed |
+| Development (`dev`) | pytest, pytest-qt, ruff, mypy, types-shapely, types-tqdm | Installed |
 | Candidate (`triangulation`) | startinpy | Not installed |
 
 `mesh_to_geotiff` is unnecessary for the implemented export path. SciPy is now
@@ -565,7 +646,7 @@ Outlet domain records, use case and Rasterio adapter live in each layer's
 
 ### Catchment delineation
 
-After **Select pour points**, open **Catchments**, enter a new output directory
+After **Select pour points**, open **Catchments**, enter an output directory
 and the minimum contributing-cell accumulation, then click **Delineate catchments**.
 Every prepared outlet gets a result, including rejected outlets with a reason and
 no catchment mask. Prepared nearest-cell candidates are qualified against the newly
@@ -607,13 +688,22 @@ Each completed run contains:
   area, status and diagnostics for every outlet.
 
 Outputs are staged in a temporary sibling directory and published only after the
-whole run succeeds. Existing directories are never overwritten. Failed/cancelled
-runs remove staging files. Cancellation is checked between compiled operations;
+whole run succeeds. Reusing an existing output folder requires confirmation in a warning
+dialog. Only generated result files are replaced; previous masks listed in the old
+manifest are removed when no longer produced, and unrelated files are retained.
+Failed/cancelled calculations preserve previous outputs. Publication failures roll
+back replaced files; if restoration is blocked, the error identifies a retained recovery
+folder. Replacing a DEM invalidates prepared outlets even if its filename stays the same.
+Cancellation is checked between compiled operations;
 Numba kernels and their initial compilation cannot be interrupted midway.
 
-Current limits are deliberately conservative: north-up square pixels, projected
-metre CRS, 2 million cells, estimated 512 MiB memory, 100 million cell/outlet visits,
-and estimated 512 MiB uncompressed output. Diagnostics include resolution, extent,
+Hydrology requires north-up square pixels and a projected metre CRS. The Catchments
+tab offers a **Processing budget** selector. **Standard** allows 2 million cells,
+512 MiB estimated memory, 100 million cell/outlet visits and 512 MiB estimated
+uncompressed output. **Large DEM** allows 50 million cells, 12 GiB estimated
+memory, 2 billion cell/outlet visits and 4 GiB estimated output. This allows the
+32,051,907-cell / 20-outlet case through preflight without changing the DEM or
+outlet coordinates. It does not guarantee successful completion on available RAM. Diagnostics include resolution, extent,
 estimated counts and recommended corrections. These are estimates, not guarantees
 of peak process memory, particularly during the first Numba compilation.
 

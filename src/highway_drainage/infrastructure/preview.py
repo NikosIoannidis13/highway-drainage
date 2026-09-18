@@ -5,9 +5,11 @@ from pathlib import Path
 from threading import Event
 
 import numpy as np
+import numpy.typing as npt
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.features import shapes
+from rasterio.windows import Window
 
 from highway_drainage.application.terrain import ImportCancelled
 from highway_drainage.domain.hydrology import HydrologyResult
@@ -66,7 +68,12 @@ class RasterPreviewReader:
 
     def boundaries(self, result: HydrologyResult, cancel: Event) -> BoundaryPreview:
         outlines: list[CatchmentOutline] = []
-        vertices, cells = 0, 0
+        count = sum(c.mask is not None for c in result.catchments)
+        # Share the display vertex budget across outlets, rather than omitting later ones.
+        if count > 50_000:
+            return BoundaryPreview((), "Too many catchments for boundary preview (limit 50,000).")
+        budget = 250_000 // max(1, count)
+        simplified = 0
         with rasterio.Env(GDAL_CACHEMAX=16 * 1024**2):
             for catchment in result.catchments:
                 if cancel.is_set():
@@ -74,28 +81,78 @@ class RasterPreviewReader:
                 if catchment.mask is None:
                     continue
                 with rasterio.open(catchment.mask) as src:
-                    cells += src.width * src.height
-                    if src.width * src.height > 2_000_000 or cells > 100_000_000:
-                        return BoundaryPreview(
-                            tuple(outlines),
-                            "Boundary preview limit reached; remaining masks omitted.",
-                        )
-                    mask = src.read(1) == 1
-                    rings: list[tuple[tuple[float, float], ...]] = []
-                    for geometry, _ in shapes(
-                        mask.astype("uint8"), mask=mask, transform=src.transform
-                    ):
+                    factor = (
+                        math.ceil(math.sqrt(src.width * src.height / 262_144))
+                        if src.width * src.height > 2_000_000
+                        else 1
+                    )
+                    # Any contributing source cell keeps its display cell visible, even
+                    # for a tiny catchment. NoData (255) is never treated as membership.
+                    mask = np.zeros(
+                        (math.ceil(src.height / factor), math.ceil(src.width / factor)),
+                        dtype="bool",
+                    )
+                    rows = max(1, 1_048_576 // src.width // factor) * factor
+                    for top in range(0, src.height, rows):
                         if cancel.is_set():
                             raise ImportCancelled()
-                        for ring in geometry["coordinates"]:
-                            vertices += len(ring)
-                            if vertices > 250_000:
-                                return BoundaryPreview(
-                                    tuple(outlines),
-                                    "Boundary vertex limit reached; remaining masks omitted.",
-                                )
-                            rings.append(tuple((float(x), float(y)) for x, y in ring))
+                        data = (
+                            src.read(
+                                1, window=Window(0, top, src.width, min(rows, src.height - top))
+                            )
+                            == 1
+                        )
+                        reduced = _aggregate_mask(data, factor)
+                        mask[top // factor : top // factor + reduced.shape[0]] = reduced
+                    while True:
+                        rings = _mask_rings(mask, factor, src, budget, cancel)
+                        if rings is not None:
+                            break
+                        mask = _aggregate_mask(mask, 2)
+                        factor *= 2
+                    simplified += factor > 1
                     outlines.append(
                         CatchmentOutline(catchment.outlet.original.point.identifier, tuple(rings))
                     )
-        return BoundaryPreview(tuple(outlines))
+        diagnostic = (
+            f"Simplified display boundaries for {simplified} catchments; small holes or gaps "
+            "may disappear. Exported catchment masks remain at full resolution."
+            if simplified
+            else "Full-resolution catchment boundaries."
+        )
+        return BoundaryPreview(tuple(outlines), diagnostic)
+
+
+def _aggregate_mask(mask: npt.NDArray[np.bool_], factor: int) -> npt.NDArray[np.bool_]:
+    if factor == 1:
+        return mask
+    columns = np.logical_or.reduceat(mask, np.arange(0, mask.shape[1], factor), axis=1)
+    return np.logical_or.reduceat(columns, np.arange(0, mask.shape[0], factor), axis=0)
+
+
+def _mask_rings(
+    mask: npt.NDArray[np.bool_],
+    factor: int,
+    source: rasterio.io.DatasetReader,
+    budget: int,
+    cancel: Event,
+) -> list[tuple[tuple[float, float], ...]] | None:
+    rings: list[tuple[tuple[float, float], ...]] = []
+    vertices = 0
+    t = source.transform
+    for geometry, _ in shapes(mask.astype("uint8"), mask=mask):
+        if cancel.is_set():
+            raise ImportCancelled()
+        for ring in geometry["coordinates"]:
+            vertices += len(ring)
+            if vertices > budget:
+                return None
+            # Clip partial edge cells to the original raster footprint before mapping
+            # to world coordinates; this also handles rotated affine transforms.
+            pixels = (
+                (min(x * factor, source.width), min(y * factor, source.height)) for x, y in ring
+            )
+            rings.append(
+                tuple((t.a * x + t.b * y + t.c, t.d * x + t.e * y + t.f) for x, y in pixels)
+            )
+    return rings

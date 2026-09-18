@@ -15,6 +15,7 @@ class HydrologyRequest:
     max_memory_bytes: int = 512 * 1024**2
     max_cell_visits: int = 100_000_000
     max_output_bytes: int = 512 * 1024**2
+    overwrite: bool = False
 
 
 @dataclass(frozen=True)

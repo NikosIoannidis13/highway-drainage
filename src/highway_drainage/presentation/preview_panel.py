@@ -1,8 +1,9 @@
 """Two persistent scenes; the selector changes visibility only."""
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QImage, QPainterPath, QPixmap, QTransform
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainterPath
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (
 from highway_drainage.domain.preview import BoundaryPreview, RasterPreview
 from highway_drainage.presentation.navigation_view import NavigationView
 from highway_drainage.presentation.outlet_view import OutletView
+from highway_drainage.presentation.raster_item import raster_item
+from highway_drainage.presentation.satellite_view import SatelliteView
 
 
 class TerrainView(NavigationView):
@@ -34,21 +37,14 @@ class TerrainView(NavigationView):
         self.snapshot = snapshot
         scene = self.scene()
         assert scene is not None
-        image = QImage(
-            snapshot.rgba,
-            snapshot.width,
-            snapshot.height,
-            snapshot.width * 4,
-            QImage.Format.Format_RGBA8888,
-        ).copy()
-        item = scene.addPixmap(QPixmap.fromImage(image))
-        a, b, _, d, e, _ = snapshot.affine
         # Local origin avoids precision loss at survey coordinates; north is up.
-        item.setTransform(QTransform(a, -d, b, -e, 0, 0))
+        scene.addItem(raster_item(snapshot, (snapshot.affine[2], snapshot.affine[5])))
         self.fit_data()
 
 
 class PreviewPanel(QWidget):
+    satellite_update_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.boundaries: BoundaryPreview | None = None
@@ -67,6 +63,16 @@ class PreviewPanel(QWidget):
         toolbar.addWidget(self.reset_button)
         toolbar.addStretch()
         layout.addLayout(toolbar)
+        self.earth_button = QPushButton("Open Google Earth Pro (separate window)")
+        self.earth_button.setToolTip(
+            "Export current layers to a local KMZ and launch the separate Google Earth Pro app. "
+            "For satellite imagery here, use the Google satellite imagery checkbox."
+        )
+        self.earth_button.setEnabled(False)
+        layout.addWidget(self.earth_button)
+        self.show_satellite = QCheckBox("Google satellite imagery")
+        self.show_satellite.setEnabled(False)
+        layout.addWidget(self.show_satellite)
         self.stack = QStackedWidget()
         terrain = QWidget()
         terrain_layout = QVBoxLayout(terrain)
@@ -79,6 +85,11 @@ class PreviewPanel(QWidget):
         drainage = QWidget()
         drainage_layout = QVBoxLayout(drainage)
         self.drainage_view = OutletView()
+        self.show_raster_background = QCheckBox("Show raster background")
+        self.show_raster_background.setToolTip("Display the loaded DEM beneath drainage results")
+        self.show_raster_background.setEnabled(False)
+        self.show_raster_background.toggled.connect(self.drainage_view.set_raster_visible)
+        drainage_layout.addWidget(self.show_raster_background)
         drainage_layout.addWidget(self.drainage_view, 1)
         legend = QLabel(
             "Blue: highway · Orange: culverts · Red: crossings · Green rings: snapped outlets\n"
@@ -91,18 +102,35 @@ class PreviewPanel(QWidget):
         drainage_layout.addWidget(self.drainage_info)
         self.stack.addWidget(terrain)
         self.stack.addWidget(drainage)
+        self.satellite_view = SatelliteView()
+        self.stack.addWidget(self.satellite_view)
         layout.addWidget(self.stack)
         # Deliberately no loading, scene rebuilding or engineering callbacks here.
-        self.mode.currentIndexChanged.connect(self.stack.setCurrentIndex)
+        self.mode.currentIndexChanged.connect(self._select_view)
+        self.show_satellite.toggled.connect(self._select_view)
+        self.show_raster_background.toggled.connect(self.satellite_update_requested)
+        self.drainage_view.data_changed.connect(self.satellite_update_requested)
         self.setMinimumWidth(350)
 
+    def _select_view(self) -> None:
+        self.stack.setCurrentIndex(
+            2 if self.show_satellite.isChecked() else self.mode.currentIndex()
+        )
+        self.satellite_update_requested.emit()
+
     def fit_current(self) -> None:
+        if self.show_satellite.isChecked():
+            self.satellite_view.fit_data()
+            return
         if self.mode.currentIndex() == 0:
             self.terrain_view.fit_data()
         else:
             self.drainage_view.fit_data()
 
     def reset_current(self) -> None:
+        if self.show_satellite.isChecked():
+            self.satellite_view.reset_view()
+            return
         if self.mode.currentIndex() == 0:
             self.terrain_view.reset_view()
         else:
@@ -110,11 +138,17 @@ class PreviewPanel(QWidget):
 
     def show_raster(self, preview: RasterPreview) -> None:
         self.terrain_view.show_raster(preview)
+        self.drainage_view.set_raster(preview)
+        self.show_raster_background.setEnabled(True)
         self.terrain_info.setText(preview.information)
+        self.satellite_update_requested.emit()
 
     def clear_terrain(self) -> None:
         self.terrain_view.clear()
+        self.drainage_view.set_raster(None)
+        self.show_raster_background.setEnabled(False)
         self.terrain_info.setText("DEM preview is not loaded for the current inputs.")
+        self.satellite_update_requested.emit()
 
     def clear_boundaries(self) -> None:
         self.boundaries = None
@@ -123,6 +157,7 @@ class PreviewPanel(QWidget):
         for item in list(scene.items()):
             if item.data(1) == "catchment":
                 scene.removeItem(item)
+        self.satellite_update_requested.emit()
 
     def show_boundaries(self, preview: BoundaryPreview) -> None:
         self.clear_boundaries()
@@ -132,6 +167,7 @@ class PreviewPanel(QWidget):
         ox, oy = self.drainage_view._origin
         for outline in preview.outlines:
             path = QPainterPath()
+            path.setFillRule(Qt.FillRule.OddEvenFill)
             for ring in outline.rings:
                 for i, (x, y) in enumerate(ring):
                     point = QPointF(x - ox, -(y - oy))
@@ -140,7 +176,9 @@ class PreviewPanel(QWidget):
                     else:
                         path.lineTo(point)
                 path.closeSubpath()
-            item = scene.addPath(path, self.drainage_view._pen("#7c3aed", 2))
+            item = scene.addPath(
+                path, self.drainage_view._pen("#7c3aed", 2), QBrush(QColor(124, 58, 237, 35))
+            )
             item.setData(1, "catchment")
             item.setToolTip(f"Catchment {outline.identifier}")
             item.setZValue(-1)
@@ -148,3 +186,4 @@ class PreviewPanel(QWidget):
             f"{len(preview.outlines)} catchment outlines. {preview.diagnostic}"
         )
         self.drainage_view.fit_data()
+        self.satellite_update_requested.emit()
