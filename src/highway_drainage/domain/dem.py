@@ -33,6 +33,7 @@ class DemRequest:
     max_contour_edge: float | None = None
     sample_coverage: str = "boundary"
     overwrite: bool = False
+    surface_mode: str = "single"
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ class TerrainModel:
     vertical_reference: str
     boundary: tuple[Point3D, ...] | None
     method: str
+    # In a priority model, these leading triangles are authoritative faces.
+    primary_triangle_count: int | None = None
 
 
 @dataclass(frozen=True)

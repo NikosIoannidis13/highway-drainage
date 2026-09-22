@@ -14,7 +14,12 @@ import rasterio
 
 from highway_drainage.application.hydrology import check_hydrology_budget
 from highway_drainage.application.terrain import ImportCancelled
-from highway_drainage.domain.hydrology import CatchmentResult, HydrologyRequest, HydrologyResult
+from highway_drainage.domain.hydrology import (
+    CatchmentResult,
+    FlowRequest,
+    HydrologyRequest,
+    HydrologyResult,
+)
 from highway_drainage.domain.outlets import SnapMode
 from highway_drainage.infrastructure.result_files import publish_results
 from highway_drainage.infrastructure.terrain import _projected_metres
@@ -29,6 +34,17 @@ class PyFlwdirHydrology:
     def delineate(
         self, request: HydrologyRequest, cancel: Event, progress: Callable[[str], None]
     ) -> HydrologyResult:
+        return self._run(request, cancel, progress)
+
+    def generate_flow(
+        self, request: FlowRequest, cancel: Event, progress: Callable[[str], None]
+    ) -> HydrologyResult:
+        return self._run(request, cancel, progress)
+
+    def _run(
+        self, request: HydrologyRequest | FlowRequest, cancel: Event,
+        progress: Callable[[str], None],
+    ) -> HydrologyResult:
         # Lazy import keeps Numba startup/compilation out of GUI startup.
         import pyflwdir
         from pyflwdir.dem import fill_depressions
@@ -40,17 +56,19 @@ class PyFlwdirHydrology:
             )
         if output.exists() and not output.is_dir():
             raise ValueError("The catchment output path must be a directory.")
-        prepared = request.prepared
-        audit = prepared.validation
+        prepared = request.prepared if isinstance(request, HydrologyRequest) else None
+        audit = prepared.validation if prepared is not None else None
+        dem = (request.dem if isinstance(request, FlowRequest)
+               else request.prepared.request.coordinates.dem)
         with (
             rasterio.Env(GDAL_CACHEMAX=16 * 1024**2),
-            rasterio.open(prepared.request.coordinates.dem) as source,
+            rasterio.open(dem) as source,
         ):
             if not source.crs:
                 raise ValueError("DEM CRS is missing.")
             _projected_metres(source.crs.to_wkt())
             transform = source.transform
-            if (
+            if audit is not None and (
                 not audit.crs_matches
                 or not audit.dem.affine_valid
                 or source.crs.to_wkt() != audit.dem.crs
@@ -75,8 +93,8 @@ class PyFlwdirHydrology:
                     "Hydrology requires affine georeferencing, not GCP/RPC coordinates."
                 )
             cells = source.width * source.height
-            count = sum(o.pour_point is not None for o in prepared.outlets)
-            progress(check_hydrology_budget(request, cells, count, transform.a, audit.dem.bounds))
+            count = sum(o.pour_point is not None for o in prepared.outlets) if prepared else 0
+            progress(check_hydrology_budget(request, cells, count, transform.a, source.bounds))
             _check(cancel)
             progress("Reading DEM; preserving NoData boundaries.")
             values = source.read(1, masked=True, out_dtype="float64")
@@ -92,8 +110,9 @@ class PyFlwdirHydrology:
             crs = source.crs
             unit = source.units[0] or source.tags().get("elevation_unit", "unspecified DEM units")
             height, width = source.height, source.width
-        minimum_cells = request.minimum_accumulation_cells
-        if prepared.request.mode == SnapMode.ACCUMULATION:
+        minimum_cells = (request.minimum_accumulation_cells
+                         if isinstance(request, HydrologyRequest) else 1.0)
+        if prepared is not None and prepared.request.mode == SnapMode.ACCUMULATION:
             # Preserve the selection threshold when qualifying against this new model.
             factors = {
                 "cell": 1.0,
@@ -135,7 +154,7 @@ class PyFlwdirHydrology:
             for dc in range(3):
                 boundary |= valid & ~padded[dr : dr + height, dc : dc + width]
         del values, filled, padded
-        diagnostics = (
+        diagnostics: tuple[str, ...] = (
             "Depressions filled to spill elevation; valid-data edges (including NoData holes) "
             "are potential exits. No culvert burning or breach enforcement was performed.",
             "Catchments are full independent upstream areas: nested catchments overlap. "
@@ -144,6 +163,8 @@ class PyFlwdirHydrology:
             "A modeled catchment does not establish the physical culvert connection.",
             "Cancellation is checked between compiled operations, not inside Numba kernels.",
         )
+        if prepared is None:
+            diagnostics = (diagnostics[0], diagnostics[-1])
         output.parent.mkdir(parents=True, exist_ok=True)
         results: list[CatchmentResult] = []
         with TemporaryDirectory(prefix=".hydrology-", dir=output.parent) as temporary:
@@ -173,13 +194,14 @@ class PyFlwdirHydrology:
                     dst.write(data, 1)
                     dst.set_band_unit(1, units)
                     dst.update_tags(
-                        engine=f"pyflwdir {pyflwdir.__version__}", source_dem=str(audit.dem.path)
+                        engine=f"pyflwdir {pyflwdir.__version__}", source_dem=str(dem)
                     )
 
             write("conditioned_dem.tif", conditioned, np.nan, unit)
             write("flow_direction_d8.tif", d8, 247, "D8")
             write("accumulation_cells.tif", accumulation, np.nan, "cells")
-            for number, outlet in enumerate(prepared.outlets, start=1):
+            for number, outlet in enumerate(prepared.outlets if prepared else (), start=1):
+                assert prepared is not None
                 _check(cancel)
                 p = outlet.pour_point
                 reason = ""
@@ -262,18 +284,19 @@ class PyFlwdirHydrology:
             manifest = {
                 "engine": f"pyflwdir {pyflwdir.__version__}",
                 "conditioning": "fill_depressions: edge exits, max_depth=-1, D8",
-                "minimum_accumulation_cells": request.minimum_accumulation_cells,
+                "minimum_accumulation_cells": (request.minimum_accumulation_cells
+                                               if isinstance(request, HydrologyRequest) else None),
                 "effective_minimum_accumulation_cells": minimum_cells,
-                "snapping_mode": prepared.request.mode.value,
-                "maximum_snapping_distance_m": prepared.request.max_distance,
+                "snapping_mode": prepared.request.mode.value if prepared else None,
+                "maximum_snapping_distance_m": prepared.request.max_distance if prepared else None,
                 "crs_wkt": crs.to_wkt(),
                 "affine": list(transform[:6]),
-                "source_dem": str(audit.dem.path),
+                "source_dem": str(dem),
                 "result": asdict(result),
             }
             (stage / "manifest.json").write_text(
                 json.dumps(manifest, default=str, indent=2), encoding="utf-8"
             )
             _check(cancel)
-            publish_results(stage, output, request.overwrite, audit.dem.path)
+            publish_results(stage, output, request.overwrite, dem)
         return result

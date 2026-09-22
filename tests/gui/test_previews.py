@@ -183,7 +183,7 @@ def test_dem_export_populates_terrain_preview_in_worker(qtbot: QtBot, tmp_path: 
     window = MainWindow(dem_use_case=dem_service(), previews=RasterPreviewReader())
     qtbot.addWidget(window)
     window._show_result(plane(tmp_path))
-    window.export_panel.setEnabled(True)
+    window.export_panel.set_build_available(True)
     window.export_panel.output.setText(str(tmp_path / "preview_dem.tif"))
     window.export_panel.cell_size.setText("1")
     window.export_panel.export_button.click()
@@ -214,7 +214,7 @@ def test_preview_failure_keeps_successful_engineering_result(
     window.hydrology_panel.output.setText(str(request.output))
     window.hydrology_panel.run_button.click()
     qtbot.waitUntil(lambda: window.hydrology_panel.isEnabled(), timeout=120000)
-    assert window.hydrology_panel.result is not None
+    assert window.hydrology_panel.result is not None, window.report.toPlainText()
     assert request.output.is_dir()
     assert "Catchment preview unavailable" in window.report.toPlainText()
     window.close()

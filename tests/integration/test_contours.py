@@ -47,6 +47,53 @@ def test_contours_require_boundary(tmp_path: Path) -> None:
         dem_service().execute(DemRequest(contours(tmp_path, False), tmp_path / "dem.tif"))
 
 
+@pytest.mark.parametrize("kind", ["lw", "2d"])
+def test_straight_2d_polylines_do_not_affect_or_block_dem(tmp_path: Path, kind: str) -> None:
+    terrain = contours(tmp_path, boundary=False)
+    doc = document()
+    for x in (0, 4):
+        if kind == "lw":
+            doc.modelspace().add_lwpolyline(
+                [(x, 0), (x, 4)], dxfattribs={"elevation": 9999 + x}
+            )
+        else:
+            doc.modelspace().add_polyline2d(
+                [(x, 0), (x, 4)], dxfattribs={"elevation": (0, 0, 9999 + x)}
+            )
+    dataset = load(*terrain.sources, save(doc, tmp_path / "2d_contours.dxf", LineRole.CONTOUR))
+    assert not dataset.has_errors
+    assert dataset.features == terrain.features
+    assert sum(i.code == "ignored" and i.severity == "info" for i in dataset.issues) == 2
+    assert not any(i.code == "unsupported" for i in dataset.issues)
+    result = dem_service().execute(
+        DemRequest(dataset, tmp_path / "2d_dem.tif", sample_coverage="convex_hull")
+    )
+    assert result.valid_cells == 16
+    with rasterio.open(result.output) as src:
+        np.testing.assert_allclose(src.read(1), np.tile([10.5, 11.5, 12.5, 13.5], (4, 1)))
+
+
+@pytest.mark.parametrize("kind", ["lw", "2d"])
+def test_curved_contours_report_layer_in_export_error(tmp_path: Path, kind: str) -> None:
+    dataset = contours(tmp_path)
+    doc = document()
+    if kind == "lw":
+        doc.modelspace().add_lwpolyline(
+            [(0, 0, 1), (2, 0, 0)], format="xyb",
+            dxfattribs={"layer": "curved_contours", "elevation": 20},
+        )
+    else:
+        polyline = doc.modelspace().add_polyline2d(
+            [(0, 0), (2, 0)], dxfattribs={"layer": "curved_contours"}
+        )
+        polyline.vertices[0].dxf.bulge = 1
+    dataset = load(*dataset.sources, save(doc, tmp_path / "curves.dxf", LineRole.CONTOUR))
+    with pytest.raises(ValueError, match="curved_contours") as exc:
+        dem_service().execute(DemRequest(dataset, tmp_path / "blocked.tif"))
+    assert "POLYLINE" in str(exc.value)
+    assert not (tmp_path / "blocked.tif").exists()
+
+
 def test_variable_contour_elevation_is_import_error(tmp_path: Path) -> None:
     doc = document()
     doc.modelspace().add_polyline3d([(0, 0, 10), (4, 4, 11)])

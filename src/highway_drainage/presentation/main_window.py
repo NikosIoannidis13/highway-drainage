@@ -4,8 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import Qt, QThread, QTimer, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QRegularExpression, Qt, QThread, QTimer, Slot
+from PySide6.QtGui import QCloseEvent, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -30,8 +30,22 @@ from highway_drainage.application.coordinates import ValidateCoordinates
 from highway_drainage.application.crossings import FindCrossings
 from highway_drainage.application.dem import GenerateDem
 from highway_drainage.application.earth_preview import EarthPreview, EarthPreviewWriter
-from highway_drainage.application.hydrology import DelineateCatchments
+from highway_drainage.application.hydrology import (
+    DelineateCatchments,
+    GenerateFlow,
+    with_large_dem_limits,
+)
 from highway_drainage.application.outlets import SelectOutlets
+from highway_drainage.application.point_export import (
+    SHAPEFILE_SUFFIXES,
+    DirectLineExport,
+    LineExport,
+    PointExport,
+    PointWriter,
+    crossing_export,
+    line_export,
+    outlet_export,
+)
 from highway_drainage.application.preview import PreviewReader
 from highway_drainage.application.project_raster import ProjectRaster, ProjectRasterReader
 from highway_drainage.application.satellite import SatelliteBuilder, SatelliteRequest
@@ -39,10 +53,11 @@ from highway_drainage.application.terrain import ImportTerrain
 from highway_drainage.domain.coordinates import CoordinateReport, CoordinateRequest
 from highway_drainage.domain.crossings import CrossingResult
 from highway_drainage.domain.dem import DemResult
-from highway_drainage.domain.hydrology import HydrologyResult
-from highway_drainage.domain.outlets import SnapResult
+from highway_drainage.domain.hydrology import FlowRequest, HydrologyResult
+from highway_drainage.domain.outlets import SnapMode, SnapResult
 from highway_drainage.domain.preview import RasterPreview
 from highway_drainage.domain.terrain import LineRole, TerrainDataset, TerrainRequest, TerrainSource
+from highway_drainage.presentation.combine_worker import CombineWorker
 from highway_drainage.presentation.coordinate_panel import CoordinatePanel
 from highway_drainage.presentation.coordinate_worker import CoordinateWorker
 from highway_drainage.presentation.crossing_panel import CrossingPanel
@@ -51,9 +66,11 @@ from highway_drainage.presentation.dem_panel import DemPanel
 from highway_drainage.presentation.dem_worker import DemWorker
 from highway_drainage.presentation.earth_launcher import open_google_earth
 from highway_drainage.presentation.earth_worker import EarthPreviewWorker
+from highway_drainage.presentation.flow_worker import FlowWorker
 from highway_drainage.presentation.hydrology_panel import HydrologyPanel
 from highway_drainage.presentation.hydrology_worker import HydrologyWorker
 from highway_drainage.presentation.outlet_worker import OutletWorker
+from highway_drainage.presentation.point_export_worker import PointExportWorker
 from highway_drainage.presentation.preview_panel import PreviewPanel
 from highway_drainage.presentation.raster_worker import RasterWorker
 from highway_drainage.presentation.task_progress import TaskProgress
@@ -74,6 +91,8 @@ class MainWindow(QMainWindow):
         coordinate_use_case: ValidateCoordinates | None = None,
         outlet_use_case: SelectOutlets | None = None,
         hydrology_use_case: DelineateCatchments | None = None,
+        flow_use_case: GenerateFlow | None = None,
+        point_writer: PointWriter | None = None,
         previews: PreviewReader | None = None,
         project_rasters: ProjectRasterReader | None = None,
         earth_writer: EarthPreviewWriter | None = None,
@@ -86,6 +105,8 @@ class MainWindow(QMainWindow):
         self._coordinate_use_case = coordinate_use_case
         self._outlet_use_case = outlet_use_case
         self._hydrology_use_case = hydrology_use_case
+        self._flow_use_case = flow_use_case
+        self._point_writer = point_writer
         self._previews = previews
         self._project_rasters = project_rasters
         self._earth_writer = earth_writer
@@ -94,12 +115,15 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: (
             RasterWorker
+            | CombineWorker
             | TerrainWorker
             | DemWorker
             | CrossingWorker
             | CoordinateWorker
             | OutletWorker
             | HydrologyWorker
+            | FlowWorker
+            | PointExportWorker
             | EarthPreviewWorker
             | None
         ) = None
@@ -131,8 +155,9 @@ class MainWindow(QMainWindow):
         form_layout.addLayout(form)
         form_layout.addWidget(
             QLabel(
-                "CRS comes from the active raster. DXF metadata and units are read automatically. "
-                "DXFs without CRS metadata use the raster CRS. Known drawing units are converted."
+                "Enter each DXF's source EPSG number (e.g. 2100), or leave it blank to use "
+                "DXF metadata / a matching .prj file, then the project raster CRS. "
+                "Known drawing units are converted."
             )
         )
         buttons = QHBoxLayout()
@@ -145,11 +170,11 @@ class MainWindow(QMainWindow):
         form_layout.addLayout(buttons)
         self.sources = QTableWidget(0, 4)
         self.sources.setHorizontalHeaderLabels(
-            ["DXF file", "Source CRS", "Z units", "Linework role"]
+            ["DXF file", "Source EPSG code", "Z units", "Linework role"]
         )
         self.sources.horizontalHeader().setStretchLastSection(True)
         self.sources.setColumnWidth(0, 230)
-        self.sources.setColumnHidden(1, True)
+        self.sources.setColumnWidth(1, 160)
         form_layout.addWidget(self.sources)
         form_layout.addWidget(
             QLabel(
@@ -174,7 +199,8 @@ class MainWindow(QMainWindow):
         self.import_button.clicked.connect(self._start_import)
         form_layout.addWidget(self.import_button)
         self.export_panel = DemPanel()
-        self.export_panel.setEnabled(False)
+        self.export_panel.set_build_available(False)
+        self.export_panel.combine_requested.connect(self._start_combine)
         self.export_panel.export_requested.connect(self._start_export)
         self.preview = PreviewPanel()
         self.preview.show_satellite.setEnabled(satellite_builder is not None)
@@ -188,11 +214,19 @@ class MainWindow(QMainWindow):
         self.preview.earth_button.setEnabled(earth_writer is not None)
         self.preview.earth_button.clicked.connect(self._start_earth_preview)
         self.crossing_panel = CrossingPanel(self.preview.drainage_view)
+        self.crossing_panel.export_requested.connect(lambda: self._export_points(False))
+        self.crossing_panel.highway_export_requested.connect(lambda: self._export_lines(False))
+        self.crossing_panel.culvert_export_requested.connect(lambda: self._export_lines(True))
         self.crossing_panel.setEnabled(crossing_use_case is not None)
         self.crossing_panel.find_requested.connect(self._start_crossings)
         self.crossing_panel.raster_requested.connect(self.load_raster)
         self.coordinate_panel = CoordinatePanel(self.preview.drainage_view)
-        self.coordinate_panel.setEnabled(coordinate_use_case is not None)
+        self.coordinate_panel.export_requested.connect(lambda: self._export_points(True))
+        self.coordinate_panel.flow_requested.connect(self._start_flow)
+        self.coordinate_panel.flow_button.setEnabled(flow_use_case is not None)
+        self.coordinate_panel.setEnabled(
+            coordinate_use_case is not None or flow_use_case is not None
+        )
         self.coordinate_panel.validate_requested.connect(self._start_coordinates)
         self.coordinate_panel.snap_requested.connect(self._start_outlets)
         self.coordinate_panel.snap_button.setEnabled(outlet_use_case is not None)
@@ -295,9 +329,10 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _show_project_raster(self, raster: ProjectRaster) -> None:
+        self.coordinate_panel.accumulation_path.clear()
         self.active_raster = raster
         self.dataset = None
-        self.export_panel.setEnabled(False)
+        self.export_panel.set_build_available(False)
         self.working_crs.blockSignals(True)
         self.working_crs.setText(raster.crs)
         self.working_crs.blockSignals(False)
@@ -331,7 +366,7 @@ class MainWindow(QMainWindow):
         self.dataset = None
         if self.active_raster is None:
             self.preview.clear_terrain()
-        self.export_panel.setEnabled(False)
+        self.export_panel.set_build_available(False)
         self.report.clear()
         self.status.setText("Inputs changed. Import again to validate.")
 
@@ -362,7 +397,15 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(str(path))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.sources.setItem(row, 0, item)
-            self.sources.setItem(row, 1, QTableWidgetItem(""))
+            crs = QLineEdit()
+            crs.setPlaceholderText("Auto / e.g. 2100")
+            crs.setToolTip(
+                "Source coordinate system: enter only the EPSG number, e.g. 2100. "
+                "Leave blank for automatic detection or the project raster CRS."
+            )
+            crs.setValidator(QRegularExpressionValidator(QRegularExpression("[0-9]+"), crs))
+            crs.textChanged.connect(self._invalidate)
+            self.sources.setCellWidget(row, 1, crs)
             units = QComboBox()
             units.addItems(["auto", "m", "ft"])
             units.currentTextChanged.connect(self._invalidate)
@@ -403,6 +446,16 @@ class MainWindow(QMainWindow):
     def _start_import(self) -> None:
         if self._use_case is None or self._thread is not None:
             return
+        source_codes = []
+        for row in range(self.sources.rowCount()):
+            editor = self.sources.cellWidget(row, 1)
+            assert isinstance(editor, QLineEdit)
+            code = editor.text().strip()
+            if code and not editor.hasAcceptableInput():
+                self._show_error("Source EPSG code must contain only numbers, e.g. 2100.")
+                editor.setFocus()
+                return
+            source_codes.append(f"EPSG:{code}" if code else "")
         overrides = tuple(
             (self._text(self.roles, row, 0), LineRole(self._choice(self.roles, row, 1)))
             for row in range(self.roles.rowCount())
@@ -411,7 +464,7 @@ class MainWindow(QMainWindow):
             tuple(
                 TerrainSource(
                     Path(self._text(self.sources, row, 0)),
-                    self._text(self.sources, row, 1),
+                    source_codes[row],
                     _SUPPLIED_ELEVATIONS,
                     self._choice(self.sources, row, 2),
                     LineRole(self._choice(self.sources, row, 3)),
@@ -485,6 +538,40 @@ class MainWindow(QMainWindow):
         self.report.appendPlainText(message)
 
     @Slot()
+    def _start_combine(self) -> None:
+        if self._thread is not None:
+            return
+        try:
+            primary, filler, output = self.export_panel.combine_paths()
+            overwrite = output.exists()
+            if overwrite and not self._confirm_overwrite(output, directory=False):
+                return
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        for panel in (self.inputs, self.export_panel, self.crossing_panel,
+                      self.coordinate_panel, self.hydrology_panel):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText("Aligning and combining terrain rasters?")
+        self._cancel = Event()
+        thread = QThread(self)
+        reader = self._project_rasters if self.export_panel.use_combined.isChecked() else None
+        worker = CombineWorker(primary, filler, output, self._cancel, reader, overwrite)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._show_project_raster)
+        worker.failed.connect(self._show_error)
+        worker.progress.connect(self._dem_progress)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
+
+    @Slot()
     def _start_export(self) -> None:
         if self.dataset is None or self._dem_use_case is None or self._thread is not None:
             return
@@ -537,6 +624,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _show_dem_result(self, result: DemResult) -> None:
+        self.coordinate_panel.accumulation_path.clear()
         # Replacing a TIFF can change its grid without changing the path text.
         self.coordinate_panel.invalidate()
         self.preview.clear_terrain()
@@ -698,6 +786,160 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
+    def _start_flow(self) -> None:
+        if self._flow_use_case is None or self._thread is not None:
+            return
+        dem_text = self.coordinate_panel.dem_path.text().strip()
+        if not dem_text:
+            self._show_error("Load or generate a DEM before generating flow grids.")
+            return
+        dem = Path(dem_text)
+        selected = QFileDialog.getExistingDirectory(self, "Choose parent folder for flow grids")
+        if not selected:
+            return
+        request = FlowRequest(dem, Path(selected) / f"{dem.stem}_flow")
+        if request.output.exists():
+            if not self._confirm_overwrite(request.output, directory=True):
+                return
+            request = replace(request, overwrite=True)
+        if self.coordinate_panel.flow_profile.currentIndex() == 1:
+            request = with_large_dem_limits(request)
+        self.coordinate_panel.invalidate()
+        for panel in (self.inputs, self.export_panel, self.crossing_panel,
+                      self.coordinate_panel, self.hydrology_panel):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText("Generating flow direction and accumulation...")
+        self._cancel = Event()
+        thread = QThread(self)
+        worker = FlowWorker(self._flow_use_case, request, self._cancel)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._show_flow)
+        worker.failed.connect(self._show_error)
+        worker.progress.connect(self._dem_progress)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
+
+    def _export_points(self, outlets: bool) -> None:
+        if self._point_writer is None or self._thread is not None:
+            return
+        if outlets:
+            selected = self.coordinate_panel.snap_result
+            if selected is None:
+                return
+            request = outlet_export(selected, Path("outlets.shp"))
+        else:
+            crossings = self.crossing_panel.result
+            if crossings is None:
+                return
+            request = crossing_export(crossings, Path("crossings.shp"))
+        self._export_shapefile(request)
+
+    def _export_lines(self, culverts: bool) -> None:
+        panel = self.crossing_panel
+        source = panel.culvert_path if culverts else panel.highway_path
+        if source.text().strip():
+            try:
+                request = panel.line_export_request(culverts)
+            except ValueError as exc:
+                self._show_error(str(exc))
+                return
+            self._export_shapefile(request)
+            return
+        result = self.crossing_panel.result
+        if result is None:
+            return
+        name = "culverts.shp" if culverts else "highway.shp"
+        self._export_shapefile(line_export(result, Path(name), culverts=culverts))
+
+    def _export_shapefile(self, request: PointExport | LineExport | DirectLineExport) -> None:
+        if self._point_writer is None or self._thread is not None:
+            return
+        if not isinstance(request, DirectLineExport) and not request.count:
+            self._show_error("No features to export.")
+            return
+        name, _ = QFileDialog.getSaveFileName(
+            self, "Export Shapefile", str(request.path), "Shapefile (*.shp)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not name:
+            return
+        path = Path(name)
+        if path.suffix.lower() != ".shp":
+            path = path.with_suffix(".shp")
+        existing = [path.with_suffix(s) for s in SHAPEFILE_SUFFIXES
+                    if path.with_suffix(s).exists()]
+        overwrite = False
+        if existing:
+            answer = QMessageBox.warning(
+                self, "Replace Shapefile",
+                "Replace these Shapefile components after export succeeds?\n"
+                + "\n".join(str(p) for p in existing),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        request = replace(request, path=path, overwrite=overwrite)
+        for panel in (self.inputs, self.export_panel, self.crossing_panel,
+                      self.coordinate_panel, self.hydrology_panel):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText(
+            "Reading DXF and exporting lines to Shapefile..."
+            if isinstance(request, DirectLineExport)
+            else f"Exporting {request.count} features to Shapefile..."
+        )
+        self._cancel = Event()
+        thread = QThread(self)
+        worker = PointExportWorker(self._point_writer, request, self._cancel)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._show_point_export)
+        worker.failed.connect(self._show_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
+
+    @Slot(object)
+    def _show_point_export(self, request: PointExport | LineExport) -> None:
+        kind = "lines" if isinstance(request, LineExport) else "points"
+        skipped = (
+            (f"Review: {request.skipped} unsupported/invalid geometry findings. "
+             if isinstance(request, LineExport)
+             else f"Skipped {request.skipped} rejected/unselected outlets. ")
+            if request.skipped else ""
+        )
+        self.status.setText(
+            f"Exported {request.count} {kind} to {request.path}. "
+            + skipped + "Keep the .shp, .shx, .dbf, .prj and .cpg files together."
+        )
+
+    @Slot(object)
+    def _show_flow(self, result: HydrologyResult) -> None:
+        panel = self.coordinate_panel
+        panel.accumulation_path.setText(str(result.accumulation))
+        panel.flow_units.setText("cells")
+        panel.snap_mode.setCurrentText(SnapMode.ACCUMULATION.value)
+        panel.report.appendPlainText(
+            f"Flow direction: {result.flow_direction}\nAccumulation: {result.accumulation}\n"
+            "Flow grids ready. Set the search distance and minimum accumulation, "
+            "then select pour points."
+        )
+        self.status.setText(f"Flow grids ready for outlet selection: {result.output}")
+
+    @Slot()
     def _start_hydrology(self) -> None:
         if self._hydrology_use_case is None or self._thread is not None:
             return
@@ -782,9 +1024,14 @@ class MainWindow(QMainWindow):
         self._worker = None
         self.inputs.setEnabled(True)
         self.crossing_panel.setEnabled(self._crossing_use_case is not None)
-        self.coordinate_panel.setEnabled(self._coordinate_use_case is not None)
+        self.coordinate_panel.setEnabled(
+            self._coordinate_use_case is not None or self._flow_use_case is not None
+        )
         self.hydrology_panel.setEnabled(self._hydrology_use_case is not None)
-        self.export_panel.setEnabled(self.dataset is not None and self._dem_use_case is not None)
+        self.export_panel.setEnabled(True)
+        self.export_panel.set_build_available(
+            self.dataset is not None and self._dem_use_case is not None
+        )
         self.cancel_button.setEnabled(False)
         self._satellite_timer.start()
         if self._closing:

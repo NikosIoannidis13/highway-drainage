@@ -8,6 +8,8 @@ from pyproj import CRS, Transformer
 from highway_drainage.domain.crossings import CrossingLimits, CrossingRequest, LineSource
 from highway_drainage.domain.terrain import LineRole, TerrainRequest
 from highway_drainage.infrastructure.cad_lines import CadLineReader
+from highway_drainage.infrastructure.cad_reference import preflight_source_crs
+from highway_drainage.infrastructure.dxf import DxfTerrainReader
 from highway_drainage.infrastructure.project_raster import RasterProjectReader
 from tests.support.coordinates import raster
 from tests.support.crossings import crossing_service
@@ -58,6 +60,37 @@ def test_missing_source_crs_requires_declaration(tmp_path: Path) -> None:
     source = replace(save(doc, tmp_path / "missing.dxf"), crs="")
     with pytest.raises(ValueError, match="Load a project GeoTIFF"):
         service().execute(TerrainRequest((source,), "2100", "survey datum"))
+
+
+@pytest.mark.parametrize("binary", [False, True])
+def test_missing_crs_fails_before_full_dxf_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binary: bool
+) -> None:
+    doc = document()
+    doc.modelspace().add_line((100, 200, 1), (110, 210, 2))
+    source = replace(save(doc, tmp_path / "missing.dxf"), crs="")
+    if binary:
+        doc.saveas(source.path, fmt="bin")
+
+    def unexpected_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("Full DXF parsing started before missing CRS was rejected")
+
+    for module in ("cad_reference", "dxf", "cad_lines"):
+        monkeypatch.setattr(f"highway_drainage.infrastructure.{module}.readfile", unexpected_read)
+    with pytest.raises(ValueError, match="source CRS is missing"):
+        service().execute(TerrainRequest((source,), "2100", "survey datum"))
+    with pytest.raises(ValueError, match="source CRS is missing"):
+        list(DxfTerrainReader().read(source))
+    with pytest.raises(ValueError, match="source CRS is missing"):
+        CadLineReader().read(
+            LineSource(source.path, ""), "2100", 0.05, CrossingLimits(), Event()
+        )
+
+
+def test_crs_preflight_detects_geodata_across_scan_chunks(tmp_path: Path) -> None:
+    path = tmp_path / "chunk_boundary.dxf"
+    path.write_bytes(b" " * (1024 * 1024 - 3) + b"GEODATA")
+    preflight_source_crs(path, "")
 
 
 def test_unreferenced_dxf_uses_explicit_raster_fallback_and_reports_assumption(

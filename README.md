@@ -141,10 +141,14 @@ library operations cannot always stop immediately.
    To create a DEM from scratch, import terrain first; its detected/declarable source
    CRS establishes the initial metre CRS until the generated raster is available.
 2. Use **Add DXF files** to select one or more files.
-3. Select the linework role. Source CRS is detected from supported DXF GEODATA or a
-   same-name `.prj` file. When that metadata is absent, the drawing is assumed to
-   use the loaded raster CRS, and this assumption is recorded in the findings.
-   There are no DXF source-setting controls. Z units default to `auto`,
+3. Select the linework role. For a known source CRS, enter only its EPSG number
+   (for example `2100`) in the DXF's **Source EPSG code** field. Leave it blank to
+   detect supported DXF GEODATA or a same-name `.prj` file, falling back to the
+   loaded raster CRS when metadata is absent. This fallback is recorded in the
+   findings. Manual assignments must agree with any CRS metadata. Without a raster,
+   the first terrain source establishes the project CRS, which must use metres.
+   Invalid or missing source CRS is rejected before full DXF loading.
+   Z units default to `auto`,
    following the drawing units; `m` and international `ft` override Z only.
 4. Optionally add exact, case-sensitive layer role overrides. These apply to all
    selected files and override each file's default linework role.
@@ -156,7 +160,8 @@ library operations cannot always stop immediately.
 | Quadrilateral 3DFACE | Preserve all four vertices; flag for planarity/triangulation review; do not select a diagonal |
 | 3D POLYLINE | Preserve ordered vertices and closure; assign breakline, boundary, unassigned or ignore |
 | LINE | Preserve its endpoints; may represent a breakline; a single open LINE is not a boundary |
-| Other entities | Report as unsupported, including 2D polylines, curves, meshes and INSERT blocks |
+| Straight 2D POLYLINE / LWPOLYLINE | Disregarded for terrain modeling; informational finding only, does not block DEM export |
+| Other entities | Report as unsupported, including curved/fitted polylines, curves, meshes and INSERT blocks |
 
 No linework is converted into a random point cloud. A boundary must already be
 closed (DXF closed flag or an exactly repeated endpoint), have nonzero XY area and
@@ -613,7 +618,20 @@ No fallback to nearest-cell mode occurs if the threshold cannot be met.
 Accumulation must be derived from the intended hydrologic DEM and have exactly
 the same CRS, transform and dimensions. The application checks alignment and
 valid values, but cannot establish the provenance of an arbitrary supplied raster.
-This step consumes accumulation; it does not calculate flow direction or accumulation.
+Before selecting pour points, click **Generate flow direction and accumulation**
+in **Outlet coordinate validation**. This requires only a loaded or generated DEM;
+no crossings or prepared outlets are required. Choose a parent folder: results are
+written to `<DEM name>_flow` beneath it. Select **Large DEM** in the flow processing
+budget if appropriate for your machine and raster size. Existing results require
+overwrite confirmation; failed/cancelled runs preserve previous outputs.
+
+The action creates `conditioned_dem.tif`, `flow_direction_d8.tif`, and
+`accumulation_cells.tif`, aligned with the original DEM. It automatically fills the
+accumulation input, sets units to `cells`, and selects **highest flow accumulation**.
+Set the maximum snapping distance and minimum accumulation, then select pour points.
+Loading or regenerating the DEM clears the old accumulation selection.
+
+Outlet selection consumes this accumulation; it does not calculate it again.
 Results in this mode are **accumulation-qualified**, not proof that the selected
 stream passes through the culvert. A radial search can cross a drainage divide;
 review the map and use a suitably small radius. The catchment stage below builds a
@@ -643,6 +661,40 @@ for this radius-based selection.
 
 Outlet domain records, use case and Rasterio adapter live in each layer's
 `outlets.py`. A Qt worker runs the operation; the panel/view only display its results.
+
+### Export crossings, outlets, highway and culverts
+
+Use **Export crossings as Shapefile (.shp)** in the crossing tab to save all
+computed intersection candidates at their original coordinates. After selecting
+pour points, use **Export selected outlets as Shapefile (.shp)** in the outlet
+coordinate tab to save the selected cell-center locations. Rejected/unselected
+outlets are excluded; separate outlets sharing one cell keep their separate IDs.
+
+The crossing tab also provides **Export highway lines as Shapefile (.shp)** and
+**Export culvert lines as Shapefile (.shp)**. Each button activates as soon as its
+own DXF is selected. It reads that file directly in the background: the other DXF,
+a raster, and crossing computation are not required. Each option
+exports its extracted 2D polylines in the project CRS, with source filename, CAD
+handle, layer, INSERT chain and curve-approximation flag. These are the lines used
+by crossing analysis, including its layer filters and curve tolerance.
+
+A ready raster is optional for all three CAD exports. Without one, enter the numeric
+**Project EPSG code** (for example `2100`) in the crossing tab. Select both DXFs
+to compute crossings, or just one to export its lines. For standalone line exports,
+the source CRS or DXF/`.prj` metadata can also establish the output CRS when no
+project EPSG has been entered.
+Optional source EPSG fields describe each drawing when it uses a different CRS.
+Blank source fields use DXF metadata / `.prj` detection, then assume the project CRS
+if metadata is missing. A loaded raster supplies the project CRS instead. A DEM is
+still required for selecting raster-based pour points and hydrology.
+
+The export preserves the result CRS and writes `.shp`, `.shx`, `.dbf`, `.prj`, and
+UTF-8 `.cpg` files. Keep these files together when copying or opening the layer.
+Attributes include `point_id`, `kind`, `status`, XY, original crossing XY, and,
+for selected outlets, elevation, snapping distance, accumulation and its units.
+Exported point geometry is 2D; outlet elevation is an attribute in the DEM's units.
+Existing components require overwrite confirmation. Files are staged before
+replacement; publication failures restore previous files where possible.
 
 ### Catchment delineation
 
@@ -743,3 +795,40 @@ remain in infrastructure; the window only builds requests and displays results.
 Keep real survey files in ignored `data/` or outside this repository. Keep generated
 artifacts in ignored `output/` or `results/`. Small intentional test datasets belong
 in `tests/fixtures/` and can be tracked in Git.
+
+## Combine terrain rasters
+
+To work directly from DXFs, add both drawings in **Terrain input**. Assign varying-Z
+polylines as **terrain samples**, or constant-Z contour lines as **contour**, and
+click **Import and validate terrain**. In **DEM / GeoTIFF → Build from DXF terrain**,
+set **Build method → 3D faces with polyline gap filling**. Choose the cell size,
+output extent and output file (`combined_dem.tif` is suggested). If there is no
+boundary, select **Use sample convex hull if no boundary** under sampled terrain
+coverage. Click **Build combined terrain and export GeoTIFF**.
+
+The app builds the face and polyline surfaces independently and samples both on
+one grid during export. Face elevations have priority even where the polyline
+surface differs. Only uncovered cells use the polyline surface; remaining gaps
+stay NoData. No intermediate TIFF selection is needed. A supplied boundary clips
+both surfaces; its Z is ignored. Build progress and TIFF metadata record how many
+cells came from each surface. Differences between faces and samples at shared XY
+are reported and allowed in this mode; conflicts within a surface remain errors.
+Review the joins before downstream hydrological conditioning. **Single terrain
+surface** retains the original build workflow.
+
+In **DEM / GeoTIFF**, choose **Combine existing rasters**. Select the 3D-face
+TIFF as **Primary DEM** and the polyline TIFF as **Gap-filling DEM**, then choose
+a separate output such as `combined_dem.tif`. Confirm matching elevation units
+and vertical datum, and click **Create combined DEM**. No DXF import is required.
+The **Build from DXF terrain** mode retains the existing terrain export controls.
+
+Valid primary elevations (including zero) are preserved. Only missing/nonfinite
+cells use the second raster, aligned with bilinear resampling to the primary grid.
+The output extent covers both rasters; remaining gaps stay NoData. No blending,
+depression filling or road conditioning is applied. Processing runs in cancellable
+blocks and publishes the output only after completion. By default it becomes the
+active terrain and invalidates previous drainage results. Uncheck **Use combined
+DEM for subsequent processing** to save it without switching the active terrain.
+
+Collapsed 3DFACEs with fewer than three distinct XYZ vertices are excluded with
+a provenance warning. Other geometry errors still block terrain export.

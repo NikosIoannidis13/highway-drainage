@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 from highway_drainage.application.coordinates import ValidateCoordinates
 from highway_drainage.application.crossings import FindCrossings
 from highway_drainage.application.dem import GenerateDem
-from highway_drainage.application.hydrology import DelineateCatchments
+from highway_drainage.application.hydrology import DelineateCatchments, GenerateFlow
 from highway_drainage.application.outlets import SelectOutlets
 from highway_drainage.application.terrain import ImportTerrain
 from highway_drainage.infrastructure.cad_lines import CadLineReader
@@ -18,6 +18,7 @@ from highway_drainage.infrastructure.dxf import DxfTerrainReader
 from highway_drainage.infrastructure.earth_preview import KmzPreviewWriter
 from highway_drainage.infrastructure.hydrology import PyFlwdirHydrology
 from highway_drainage.infrastructure.outlets import RasterOutletSnapper
+from highway_drainage.infrastructure.point_export import ShapefilePointWriter
 from highway_drainage.infrastructure.preview import RasterPreviewReader
 from highway_drainage.infrastructure.project_raster import RasterProjectReader
 from highway_drainage.infrastructure.raster import GeoTiffWriter
@@ -40,6 +41,8 @@ def main() -> int:
         coordinate_use_case=validator,
         outlet_use_case=SelectOutlets(validator, RasterOutletSnapper()),
         hydrology_use_case=DelineateCatchments(PyFlwdirHydrology()),
+        flow_use_case=GenerateFlow(PyFlwdirHydrology()),
+        point_writer=ShapefilePointWriter(),
         previews=RasterPreviewReader(),
         project_rasters=RasterProjectReader(),
         earth_writer=KmzPreviewWriter(),

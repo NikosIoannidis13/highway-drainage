@@ -98,7 +98,9 @@ class TerrainNormalizer:
         features: list[TerrainFeature] = []
         issues: list[ImportIssue] = []
         seen: dict[GeometryKey, TerrainFeature] = {}
-        elevations: dict[tuple[float, float], tuple[float, EntityReference]] = {}
+        elevations: dict[
+            tuple[float, float, bool], tuple[float, EntityReference, LineRole]
+        ] = {}
         contour_mode = any(
             source.default_role in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES)
             or any(
@@ -143,6 +145,13 @@ class TerrainNormalizer:
                 transformed.pop()
                 closed = True
             feature = replace(item, vertices=tuple(transformed), closed=closed)
+            if feature.is_face and len(set(feature.vertices)) < 3:
+                issues.append(ImportIssue(
+                    "warning", "collapsed_face",
+                    "Collapsed 3DFACE with fewer than three distinct XYZ vertices excluded; "
+                    "it contributes no surface area.", ref,
+                ))
+                continue
             invalid = _invalid_geometry(feature)
             if invalid:
                 issues.append(ImportIssue("error", "geometry", invalid, ref))
@@ -178,7 +187,7 @@ class TerrainNormalizer:
                 () if contour_mode and feature.role == LineRole.BOUNDARY else feature.vertices
             )
             for v in elevation_vertices:
-                previous = elevations.get((v.x, v.y))
+                previous = elevations.get((v.x, v.y, feature.is_face))
                 if previous is not None and previous[0] != v.z:
                     issues.append(
                         ImportIssue(
@@ -191,7 +200,25 @@ class TerrainNormalizer:
                     )
                     break
             for v in elevation_vertices:
-                elevations.setdefault((v.x, v.y), (v.z, ref))
+                other = elevations.get((v.x, v.y, not feature.is_face))
+                if other is not None and other[0] != v.z:
+                    sampled = (feature.role if not feature.is_face else other[2]) in (
+                        LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES,
+                    )
+                    issues.append(ImportIssue(
+                        "warning" if sampled else "error",
+                        "surface_z_difference" if sampled else "z_conflict",
+                        (
+                            "Faces and sampled polylines differ at shared XY. "
+                            "Use '3D faces with polyline gap filling' to keep face elevations; "
+                            "a single-surface build requires resolving this difference."
+                            if sampled else "Shared XY has conflicting elevations; not averaged."
+                        ),
+                        ref, other[1],
+                    ))
+                    break
+            for v in elevation_vertices:
+                elevations.setdefault((v.x, v.y, feature.is_face), (v.z, ref, feature.role))
             if all(v.z == 0 for v in feature.vertices):
                 issues.append(
                     ImportIssue(

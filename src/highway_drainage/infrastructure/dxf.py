@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 
 from ezdxf.entities.line import Line
+from ezdxf.entities.lwpolyline import LWPolyline
 from ezdxf.entities.polyline import Polyline
 from ezdxf.entities.solid import Face3d
 from ezdxf.filemanagement import readfile
@@ -17,11 +18,12 @@ from highway_drainage.domain.terrain import (
     TerrainFeature,
     TerrainSource,
 )
-from highway_drainage.infrastructure.cad_reference import cad_frame
+from highway_drainage.infrastructure.cad_reference import cad_frame, preflight_source_crs
 
 
 class DxfTerrainReader:
     def read(self, source: TerrainSource) -> Iterable[TerrainFeature | ImportIssue]:
+        preflight_source_crs(source.path, source.crs, source.fallback_crs)
         try:
             document = readfile(source.path)
         except (OSError, DXFError) as exc:
@@ -82,6 +84,22 @@ class DxfTerrainReader:
                     tuple(point(v) for v in entity.points()),
                     closed=bool(entity.is_closed),
                     role=role,
+                )
+            elif isinstance(entity, LWPolyline) or (
+                isinstance(entity, Polyline) and entity.is_2d_polyline
+            ):
+                if entity.has_arc or (
+                    isinstance(entity, Polyline) and int(entity.dxf.flags) & 6
+                ):
+                    yield ImportIssue(
+                        "warning", "unsupported",
+                        "Curved/fitted 2D polylines need explicit conversion to supported "
+                        "3D terrain geometry before import.", ref,
+                    )
+                    continue
+                yield ImportIssue(
+                    "info", "ignored",
+                    f"Straight {ref.entity_type} disregarded for terrain modeling.", ref,
                 )
             elif isinstance(entity, Line):
                 yield TerrainFeature(

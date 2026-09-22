@@ -7,10 +7,10 @@ from threading import Event
 from typing import Protocol
 
 from highway_drainage.application.terrain import ImportCancelled
-from highway_drainage.domain.hydrology import HydrologyRequest, HydrologyResult
+from highway_drainage.domain.hydrology import FlowRequest, HydrologyRequest, HydrologyResult
 
 
-def with_large_dem_limits(request: HydrologyRequest) -> HydrologyRequest:
+def with_large_dem_limits[T: (HydrologyRequest, FlowRequest)](request: T) -> T:
     """Explicit larger processing budget; never changes elevations or outlet locations."""
     return replace(
         request,
@@ -22,7 +22,7 @@ def with_large_dem_limits(request: HydrologyRequest) -> HydrologyRequest:
 
 
 def check_hydrology_budget(
-    request: HydrologyRequest,
+    request: HydrologyRequest | FlowRequest,
     cells: int,
     outlets: int,
     resolution: float,
@@ -64,6 +64,29 @@ class HydrologyEngine(Protocol):
     def delineate(
         self, request: HydrologyRequest, cancel: Event, progress: Callable[[str], None]
     ) -> HydrologyResult: ...
+
+
+class FlowEngine(Protocol):
+    def generate_flow(
+        self, request: FlowRequest, cancel: Event, progress: Callable[[str], None]
+    ) -> HydrologyResult: ...
+
+
+class GenerateFlow:
+    def __init__(self, engine: FlowEngine) -> None:
+        self._engine = engine
+
+    def execute(
+        self, request: FlowRequest, cancel: Event | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> HydrologyResult:
+        token = cancel if cancel is not None else Event()
+        if token.is_set():
+            raise ImportCancelled()
+        if min(request.max_cells, request.max_memory_bytes,
+               request.max_cell_visits, request.max_output_bytes) < 1:
+            raise ValueError("Hydrology resource limits must be positive.")
+        return self._engine.generate_flow(request, token, progress or (lambda message: None))
 
 
 class DelineateCatchments:

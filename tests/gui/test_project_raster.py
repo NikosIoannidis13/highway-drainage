@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QFileDialog, QPushButton
+from pyproj import CRS, Transformer
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QFileDialog, QLineEdit, QPushButton, QTabWidget
 from pytestqt.qtbot import QtBot
 
 from highway_drainage.infrastructure.project_raster import RasterProjectReader
@@ -9,7 +11,68 @@ from highway_drainage.presentation.main_window import MainWindow
 from highway_drainage.presentation.task_progress import TaskProgress
 from tests.support.coordinates import candidates, raster
 from tests.support.crossings import crossing_service
-from tests.support.terrain_input import document, save
+from tests.support.terrain_input import TRIANGLE, document, save, service
+
+
+@pytest.mark.parametrize("with_raster", [False, True])
+def test_manual_epsg_import_and_project_transformation(
+    qtbot: QtBot, tmp_path: Path, with_raster: bool
+) -> None:
+    window = MainWindow(service(), project_rasters=RasterProjectReader())
+    qtbot.addWidget(window)
+    tabs = window.findChild(QTabWidget)
+    assert tabs is not None
+    tabs.setCurrentIndex(0)
+    window.show()
+    if with_raster:
+        window.load_raster(str(raster(tmp_path)))
+        qtbot.waitUntil(lambda: window._thread is None, timeout=10000)
+    doc = document()
+    doc.modelspace().add_3dface(TRIANGLE)
+    source = save(doc, tmp_path / "manual.dxf")
+    window.add_files([str(source.path)])
+    editor = window.sources.cellWidget(0, 1)
+    assert isinstance(editor, QLineEdit)
+    qtbot.waitUntil(editor.isVisible)
+    QTest.keyClicks(editor, "2100")
+    window.import_button.click()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=10000)
+    assert window.dataset is not None
+    target = 32634 if with_raster else 2100
+    assert CRS(window.dataset.crs_wkt).to_epsg() == target
+    assert CRS(window.dataset.sources[0].crs).to_epsg() == 2100
+    expected = Transformer.from_crs(2100, target, always_xy=True).transform(*TRIANGLE[0][:2])
+    point = window.dataset.features[0].vertices[0]
+    assert (point.x, point.y) == pytest.approx(expected)
+    editor.setText("32634")
+    assert window.dataset is None
+
+
+@pytest.mark.parametrize("code", ["EPSG:2100", "99999999", "4326"])
+def test_invalid_manual_epsg_rejected_before_dxf_loading(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    window = MainWindow(service())
+    qtbot.addWidget(window)
+    source = save(document(), tmp_path / "invalid.dxf")
+    window.add_files([str(source.path)])
+    editor = window.sources.cellWidget(0, 1)
+    assert isinstance(editor, QLineEdit)
+    editor.setText(code)
+    reads: list[object] = []
+
+    def unexpected_read(*args: object, **kwargs: object) -> None:
+        reads.append(args)
+        raise AssertionError("Invalid CRS must be rejected before DXF loading")
+
+    for module in ("dxf", "cad_reference"):
+        monkeypatch.setattr(f"highway_drainage.infrastructure.{module}.readfile", unexpected_read)
+    window.import_button.click()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=10000)
+    assert not reads
+    assert window.dataset is None
+    assert "CRS" in window.status.text() or "EPSG" in window.status.text()
+    assert window.inputs.isEnabled()
 
 
 def test_open_external_raster_sets_project_crs_and_clears_stale_results(
@@ -63,14 +126,14 @@ def test_progress_uses_real_counts_and_busy_for_unknown_stages(qtbot: QtBot) -> 
     assert "Preparing" not in progress.elapsed.text()
 
 
-def test_crossing_tab_loads_raster_first_and_has_no_source_settings(
+def test_crossing_tab_optional_raster_sets_project_crs(
     qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     window = MainWindow(project_rasters=RasterProjectReader(), crossing_use_case=crossing_service())
     qtbot.addWidget(window)
     panel = window.crossing_panel
-    assert not panel.source_form.isEnabled()
-    assert not panel.find_button.isEnabled()
+    assert panel.source_form.isEnabled()
+    assert panel.find_button.isEnabled()
     assert not any(
         "source settings" in button.text().lower() for button in window.findChildren(QPushButton)
     )

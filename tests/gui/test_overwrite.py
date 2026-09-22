@@ -23,7 +23,7 @@ def test_overwrite_warning_cancel_then_confirm(qtbot: QtBot, tmp_path: Path, kin
         path = tmp_path / "existing.tif"
         dem_service().execute(DemRequest(dataset, path))
         window._show_result(dataset)
-        window.export_panel.setEnabled(True)
+        window.export_panel.set_build_available(True)
         window.export_panel.output.setText(str(path))
         window.export_panel.cell_size.setText("2")
         button = window.export_panel.export_button

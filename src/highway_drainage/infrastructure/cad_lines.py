@@ -27,7 +27,7 @@ from highway_drainage.domain.crossings import (
     ExtractedLines,
     LineSource,
 )
-from highway_drainage.infrastructure.cad_reference import cad_frame
+from highway_drainage.infrastructure.cad_reference import cad_frame, preflight_source_crs
 from highway_drainage.infrastructure.terrain import _projected_metres
 
 
@@ -99,6 +99,7 @@ class CadLineReader:
         cancel: Event,
     ) -> ExtractedLines:
         target = _projected_metres(working_crs)
+        preflight_source_crs(source.path, source.crs, source.fallback_crs)
         try:
             document = readfile(source.path)
         except (OSError, DXFError) as exc:
@@ -111,7 +112,7 @@ class CadLineReader:
                 CrossingIssue(
                     "warning",
                     "assumed_raster_crs",
-                    "DXF has no CRS metadata; assumed the project raster CRS.",
+                    "DXF has no CRS metadata; assumed the project CRS.",
                     file_ref,
                 )
             )

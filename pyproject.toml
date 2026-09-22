@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=2,<3",
     "rasterio>=1.4,<2",
     "pyflwdir>=0.5.12,<0.6",
+    "pyshp>=3.1.6,<4",
 ]
 
 [project.optional-dependencies]
@@ -70,4 +71,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["pyflwdir", "pyflwdir.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["shapefile", "shapefile.*"]
 ignore_missing_imports = true

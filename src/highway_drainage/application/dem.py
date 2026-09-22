@@ -1,6 +1,8 @@
 """Plan and orchestrate bounded terrain-model construction and DEM export."""
 
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import ROUND_CEILING, Decimal
 from math import hypot, isfinite, isnan, sqrt
 from threading import Event
@@ -21,11 +23,35 @@ def plan_dem(request: DemRequest) -> GridPlan:
     """Count first. No sample grid, GIS index or triangle arrays are allocated here."""
     if request.dataset.has_errors:
         raise ValueError("Resolve terrain import errors before generating a DEM.")
+    if request.surface_mode not in ("single", "faces_with_polyline_gaps"):
+        raise ValueError("Choose single terrain or 3D faces with polyline gap filling.")
+    if request.surface_mode == "single" and any(
+        i.code == "surface_z_difference" for i in request.dataset.issues
+    ):
+        raise ValueError(
+            "Faces and sampled polylines differ in elevation at shared XY coordinates. "
+            "Choose '3D faces with polyline gap filling' to preserve face elevations, "
+            "or resolve those differences for a single surface."
+        )
     if not request.dataset.features:
         raise ValueError("There is no terrain geometry to model.")
-    if any(i.code == "unsupported" for i in request.dataset.issues):
+    unsupported = Counter(
+        (i.reference.path.name, i.reference.layer, i.reference.entity_type)
+        for i in request.dataset.issues if i.code == "unsupported"
+    )
+    if unsupported:
+        details = "; ".join(
+            f"{name}, layer '{layer}': {count} {entity_type}"
+            for (name, layer, entity_type), count in unsupported.most_common(20)
+        )
+        if len(unsupported) > 20:
+            details += f"; {len(unsupported) - 20} more groups (see import findings)"
         raise ValueError(
-            "Unsupported input entities were skipped. Exclude their layers and reimport."
+            f"DEM export blocked by skipped geometry: {details}. "
+            "If these objects are not terrain, add their exact layer names under Terrain input "
+            " > Layer overrides, set them to ignore, and reimport. "
+            "If they contain terrain, convert them to supported geometry in CAD first. "
+            "Do not ignore a layer that also contains needed contours."
         )
     if any(not f.is_face and f.role == LineRole.UNASSIGNED for f in request.dataset.features):
         raise ValueError(
@@ -65,10 +91,14 @@ def plan_dem(request: DemRequest) -> GridPlan:
     if limits.tile_size > 1024:
         raise ValueError("Tile size must not exceed 1024 cells per side.")
     nvertices = sum(len(f.vertices) for f in request.dataset.features)
+    sample_vertices = sum(
+        len(f.vertices) for f in request.dataset.features
+        if not f.is_face and f.role in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES)
+    )
     # Count densification before allocating samples; resolution does not control it.
     if request.contour_spacing is not None:
         for feature in request.dataset.features:
-            if feature.role not in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES):
+            if feature.is_face or feature.role not in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES):
                 continue
             pairs = list(zip(feature.vertices, feature.vertices[1:], strict=False))
             if feature.closed:
@@ -82,9 +112,16 @@ def plan_dem(request: DemRequest) -> GridPlan:
                         Decimal(str(length)) / Decimal(str(request.contour_spacing))
                     ).to_integral_value(rounding=ROUND_CEILING)
                 )
-                nvertices += max(0, intervals - 1)
+                extra_samples = max(0, intervals - 1)
+                nvertices += extra_samples
+                sample_vertices += extra_samples
     faces = sum(max(0, len(f.vertices) - 2) for f in request.dataset.features if f.is_face)
-    triangle_estimate = faces if faces else 2 * nvertices
+    triangle_estimate = (
+        # Face vertices already belong to preserved triangles. Only polyline samples
+        # enter the fallback triangulation; boundary vertices only define clipping.
+        faces + 2 * sample_vertices if request.surface_mode == "faces_with_polyline_gaps"
+        else faces if faces else 2 * nvertices
+    )
     boundary = next((f for f in request.dataset.features if f.role == LineRole.BOUNDARY), None)
     if request.extent is None:
         features = (boundary,) if boundary is not None else request.dataset.features
@@ -145,8 +182,9 @@ def plan_dem(request: DemRequest) -> GridPlan:
         raise ResourceLimitError(
             f"Estimated working memory exceeds {limits.max_memory_bytes / 1024**2:g} MiB.",
             plan,
-            "Clip/split the input terrain, reduce the tile size, or use a reviewed larger memory "
-            "budget. A smaller export extent alone does not reduce the input model size.",
+            "Increase polyline sample spacing or leave it blank for source vertices only. "
+            "If it is already blank, clip/split the input terrain. A coarser raster or smaller "
+            "export extent alone does not reduce the input model size.",
         )
     if xmin + request.cell_size == xmin or ymax - request.cell_size == ymax:
         raise ValueError("Cell size is below coordinate precision at this extent. Increase it.")
@@ -195,7 +233,10 @@ class GenerateDem:
             raise ValueError("The output directory does not exist.")
         report(plan.describe())
         try:
-            model = self._builder.build(request, plan, token)
+            if request.surface_mode == "faces_with_polyline_gaps":
+                model = self._build_combined(request, plan, token, report)
+            else:
+                model = self._builder.build(request, plan, token)
             if model.method in ("sampled_contours_unconstrained", "sampled_xyz_unconstrained"):
                 report(
                     "Terrain approximation: XYZ samples are interpolated; source line segments "
@@ -216,3 +257,55 @@ class GenerateDem:
                 "applications; increasing cell size helps raster work but not input-model memory.",
             ) from exc
         return DemResult(request.output, plan, len(model.triangles), valid, model.method)
+
+    def _build_combined(
+        self, request: DemRequest, plan: GridPlan, cancel: Event,
+        report: Callable[[str], None],
+    ) -> TerrainModel:
+        features = request.dataset.features
+        faces = tuple(f for f in features if f.is_face)
+        samples = tuple(
+            f for f in features if not f.is_face
+            and f.role in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES)
+        )
+        boundaries = tuple(f for f in features if not f.is_face and f.role == LineRole.BOUNDARY)
+        if not faces or not samples:
+            raise ValueError(
+                "Gap filling needs both 3D faces and polylines assigned as terrain samples "
+                "or contour. Import both DXFs in Terrain input first."
+            )
+        if any(not f.is_face and f.role not in (
+            LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES, LineRole.BOUNDARY,
+        ) for f in features):
+            raise ValueError(
+                "For polyline gap filling, assign elevation linework as terrain samples "
+                "or contour. Breaklines cannot be used as fallback samples automatically."
+            )
+        # Boundary Z is irrelevant: it clips both independently built surfaces in the writer.
+        primary_request = replace(
+            request, surface_mode="single", dataset=replace(request.dataset, features=faces),
+        )
+        fallback_request = replace(
+            request, surface_mode="single",
+            dataset=replace(request.dataset, features=samples + boundaries),
+        )
+        report("Building authoritative 3D-face surface…")
+        primary = self._builder.build(primary_request, plan, cancel)
+        if cancel.is_set():
+            raise ImportCancelled()
+        report("Building polyline gap-filling surface…")
+        fallback = self._builder.build(fallback_request, plan, cancel)
+        if len(primary.triangles) + len(fallback.triangles) > request.limits.max_triangles:
+            raise ResourceLimitError(
+                "Combined triangle limit exceeded.", plan, "Clip or split the input terrain."
+            )
+        report(
+            "Rasterizing both surfaces on one grid: preserve face elevations and fill only "
+            "uncovered cells with polyline interpolation. Sample segments are not enforced "
+            "edges. Remaining gaps stay NoData; inspect the joins before hydrology."
+        )
+        return TerrainModel(
+            primary.triangles + fallback.triangles, primary.crs_wkt,
+            primary.vertical_reference, fallback.boundary, "faces_with_polyline_gaps",
+            primary_triangle_count=len(primary.triangles),
+        )

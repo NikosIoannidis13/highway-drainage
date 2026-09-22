@@ -45,7 +45,7 @@ def test_multiple_file_selection_and_background_import(qtbot: QtBot, tmp_path: P
     assert window.dataset is not None
     assert len(window.dataset.sources) == 2
     assert "2100" in window.dataset.sources[0].crs
-    assert window.sources.isColumnHidden(1)
+    assert not window.sources.isColumnHidden(1)
     assert window.dataset.vertical_reference == "Survey elevations as supplied"
     assert not hasattr(window, "vertical_reference")
     assert len(window.dataset.features) == 1

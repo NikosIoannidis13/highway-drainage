@@ -199,7 +199,7 @@ def test_unsupported_and_ignored_entities_are_reported(tmp_path: Path) -> None:
         save(doc, tmp_path / "unsupported.dxf"), layer_roles=(("IGNORE", LineRole.IGNORE),)
     )
     result = load(source)
-    assert sum(i.code == "unsupported" for i in result.issues) == 3
+    assert sum(i.code == "unsupported" for i in result.issues) == 2
     assert any(i.code == "ignored" for i in result.issues)
     assert not result.features
 
@@ -213,6 +213,34 @@ def test_missing_file_and_cancellation(tmp_path: Path) -> None:
     cancel.set()
     with pytest.raises(ImportCancelled):
         service().execute(request, cancel)
+
+
+@pytest.mark.parametrize("kind", ["lw", "2d"])
+def test_straight_2d_polylines_ignored_with_ocs_and_elevation(tmp_path: Path, kind: str) -> None:
+    doc = document()
+    doc.modelspace().add_3dface(TRIANGLE)
+    doc.units = 2  # Feet.
+    attributes = {"extrusion": (0, 0, -1)}
+    if kind == "lw":
+        entity = doc.modelspace().add_lwpolyline(
+            [(1, 2), (4, 2), (4, 5)], close=True,
+            dxfattribs={**attributes, "elevation": 10},
+        )
+    else:
+        polyline = doc.modelspace().add_polyline2d(
+            [(1, 2), (4, 2), (4, 5)], close=True,
+            dxfattribs={**attributes, "elevation": (0, 0, 10)},
+        )
+    source = replace(save(doc, tmp_path / "ocs.dxf", LineRole.CONTOUR), z_unit="auto")
+    result = load(source)
+    assert not result.has_errors
+    assert len(result.features) == 1
+    assert result.features[0].is_face
+    handle = entity.dxf.handle if kind == "lw" else polyline.dxf.handle
+    assert any(
+        i.code == "ignored" and i.severity == "info" and i.reference.handle == handle
+        for i in result.issues
+    )
 
 
 def test_degenerate_face_and_vertical_line_are_rejected(tmp_path: Path) -> None:

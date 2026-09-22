@@ -27,6 +27,8 @@ class CoordinatePanel(QWidget):
     snap_requested = Signal()
     invalidated = Signal()
     raster_requested = Signal(str)
+    flow_requested = Signal()
+    export_requested = Signal()
 
     def __init__(self, view: OutletView | None = None) -> None:
         super().__init__()
@@ -42,6 +44,14 @@ class CoordinatePanel(QWidget):
         row.addWidget(self.dem_path)
         row.addWidget(browse)
         layout.addLayout(row)
+        self.flow_button = QPushButton("Generate flow direction and accumulation")
+        self.flow_button.clicked.connect(self.flow_requested)
+        layout.addWidget(self.flow_button)
+        self.flow_profile = QComboBox()
+        self.flow_profile.addItems(["Standard", "Large DEM"])
+        flow_form = QFormLayout()
+        flow_form.addRow("Flow processing budget", self.flow_profile)
+        layout.addLayout(flow_form)
         self.validate_button = QPushButton("Validate outlet coordinates")
         self.validate_button.clicked.connect(self.validate_requested)
         layout.addWidget(self.validate_button)
@@ -66,6 +76,10 @@ class CoordinatePanel(QWidget):
         self.snap_button = QPushButton("Select pour points")
         self.snap_button.clicked.connect(self.snap_requested)
         layout.addWidget(self.snap_button)
+        self.export_button = QPushButton("Export selected outlets as Shapefile (.shp)")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self.export_requested)
+        layout.addWidget(self.export_button)
         legend = QLabel(
             "Red: geometric crossing; grey: containing DEM pixel; green ring: pour point. "
             "Nearest-cell results are provisional. Review flow-based selections against culverts."
@@ -79,6 +93,7 @@ class CoordinatePanel(QWidget):
         self.report.setReadOnly(True)
         layout.addWidget(self.report)
         self.dem_path.textChanged.connect(self.invalidate)
+        self.dem_path.textChanged.connect(self.accumulation_path.clear)
         for field in (
             self.snap_distance,
             self.accumulation_path,
@@ -111,6 +126,9 @@ class CoordinatePanel(QWidget):
     def show_snapping(self, result: SnapResult) -> None:
         self.show_result(result.validation)
         self.snap_result = result
+        self.export_button.setEnabled(any(
+            o.pour_point is not None and o.status != "rejected" for o in result.outlets
+        ))
         self.outlet_view.show_outlets(result)
         lines = [
             "\nPOUR POINT SELECTION",
@@ -141,6 +159,7 @@ class CoordinatePanel(QWidget):
             self.raster_requested.emit(path)
 
     def invalidate(self) -> None:
+        self.export_button.setEnabled(False)
         self.result = None
         self.snap_result = None
         self.outlet_view.clear()

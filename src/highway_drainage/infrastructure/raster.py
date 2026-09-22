@@ -85,6 +85,7 @@ class GeoTiffWriter:
         xmin, _, _, ymax = plan.extent
         size = plan.cell_size
         valid_count = 0
+        primary_cells = fallback_cells = 0
         tile = request.limits.tile_size
         temporary = request.output.with_name(f".{request.output.stem}.{uuid4().hex}.part.tif")
         total_tiles = ceil(plan.width / tile) * ceil(plan.height / tile)
@@ -125,6 +126,7 @@ class GeoTiffWriter:
                         contour_spacing_m=str(request.contour_spacing),
                         max_contour_edge_m=str(request.max_contour_edge),
                         coverage="boundary_and_available_triangles_cell_centers",
+                        primary_triangle_count=str(model.primary_triangle_count),
                     )
                     for row in range(0, plan.height, tile):
                         for col in range(0, plan.width, tile):
@@ -142,7 +144,11 @@ class GeoTiffWriter:
                                 xmin + (col + width) * size,
                                 ymax - row * size,
                             )
-                            for raw_i in tree.query(footprint):
+                            candidates = tree.query(footprint)
+                            # Spatial-index order is arbitrary. Face triangles must run first.
+                            if model.primary_triangle_count is not None:
+                                candidates = np.sort(candidates)
+                            for raw_i in candidates:
                                 if cancel.is_set():
                                     raise ImportCancelled()
                                 i = int(raw_i)
@@ -171,11 +177,25 @@ class GeoTiffWriter:
                                 fill = inside & ~mask
                                 patch[fill] = values[fill].astype(np.float32)
                                 mask[fill] = True
+                                if model.primary_triangle_count is not None:
+                                    if i < model.primary_triangle_count:
+                                        primary_cells += int(np.count_nonzero(fill))
+                                    else:
+                                        fallback_cells += int(np.count_nonzero(fill))
                             valid_count += int(np.count_nonzero(occupied))
                             dst.write(data, 1, window=Window(col, row, width, height))
                             done += 1
                             if done == total_tiles or done % max(1, total_tiles // 100) == 0:
                                 progress(f"Writing DEM: {done}/{total_tiles} tiles.")
+                    if model.primary_triangle_count is not None:
+                        dst.update_tags(
+                            primary_cells=str(primary_cells), gap_filler_cells=str(fallback_cells),
+                            merge_rule="valid face elevation first; otherwise polyline surface",
+                        )
+                        progress(
+                            f"Combined DEM: {primary_cells:,} face cells, "
+                            f"{fallback_cells:,} polyline gap-filler cells."
+                        )
             if not valid_count:
                 raise ValueError(
                     "No cell centres intersect the terrain. Check extent and cell size."

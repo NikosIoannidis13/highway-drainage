@@ -12,6 +12,42 @@ from ezdxf.math import Matrix44, Vec3
 from pyproj import CRS
 
 
+def _missing_crs(path: Path) -> ValueError:
+    return ValueError(
+        f"{path.name}: source CRS is missing. Load a project GeoTIFF first, "
+        "or provide DXF georeferencing / a matching .prj file."
+    )
+
+
+def preflight_source_crs(path: Path, declared: str, fallback: str = "") -> None:
+    """Reject missing CRS before constructing a potentially huge DXF document."""
+    if declared.strip():
+        source_crs(declared)
+    if fallback.strip():
+        source_crs(fallback)
+    sidecar = path.with_suffix(".prj")
+    if sidecar.is_file():
+        source_crs(sidecar.read_text(encoding="utf-8-sig"))
+        return
+    if declared.strip() or fallback.strip():
+        return
+    # GEODATA is an ASCII type name in both text and binary DXF. A conservative
+    # byte scan avoids parsing millions of entities just to discover its absence.
+    # A match only defers to cad_frame's authoritative metadata validation.
+    marker = b"GEODATA"
+    try:
+        with path.open("rb") as stream:
+            tail = b""
+            while chunk := stream.read(1024 * 1024):
+                data = tail + chunk
+                if marker in data:
+                    return
+                tail = data[-(len(marker) - 1):]
+    except OSError as exc:
+        raise ValueError(f"Cannot read {path.name}: {exc}") from exc
+    raise _missing_crs(path)
+
+
 def source_crs(value: str) -> CRS:
     crs = CRS.from_user_input(value)
     if not crs.is_projected or len(crs.axis_info) != 2:
@@ -58,10 +94,7 @@ def cad_frame(document: Drawing, path: Path, declared: str, fallback: str = "") 
             raise ValueError(f"{path.name}: embedded CRS conflicts with its .prj file.")
         detected = sidecar_crs.to_wkt()
     if not detected and not declared.strip() and not fallback:
-        raise ValueError(
-            f"{path.name}: source CRS is missing. Load a project GeoTIFF first, "
-            "or provide DXF georeferencing / a matching .prj file."
-        )
+        raise _missing_crs(path)
     crs = source_crs(detected or declared or fallback)
     if detected and declared.strip() and not crs.equals(source_crs(declared)):
         raise ValueError(f"{path.name}: declared CRS conflicts with DXF metadata.")
@@ -97,6 +130,7 @@ def cad_frame(document: Drawing, path: Path, declared: str, fallback: str = "") 
 
 
 def resolve_source_crs(path: Path, declared: str, fallback: str = "") -> CRS:
+    preflight_source_crs(path, declared, fallback)
     if declared.strip():
         return source_crs(declared)
     sidecar = path.with_suffix(".prj")
