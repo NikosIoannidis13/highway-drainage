@@ -16,6 +16,7 @@ from highway_drainage.infrastructure.coordinates import RasterCoordinateInspecto
 from highway_drainage.infrastructure.crossings import ShapelyCrossings
 from highway_drainage.infrastructure.dxf import DxfTerrainReader
 from highway_drainage.infrastructure.earth_preview import KmzPreviewWriter
+from highway_drainage.infrastructure.face_audit import FaceAuditor
 from highway_drainage.infrastructure.hydrology import PyFlwdirHydrology
 from highway_drainage.infrastructure.outlets import RasterOutletSnapper
 from highway_drainage.infrastructure.point_export import ShapefilePointWriter
@@ -35,7 +36,7 @@ def main() -> int:
     app.setApplicationName("Highway Drainage")
     validator = ValidateCoordinates(RasterCoordinateInspector())
     window = MainWindow(
-        ImportTerrain(DxfTerrainReader(), TerrainNormalizer()),
+        ImportTerrain(DxfTerrainReader(), TerrainNormalizer(), FaceAuditor()),
         dem_use_case=GenerateDem(SurfaceBuilder(), GeoTiffWriter()),
         crossing_use_case=FindCrossings(CadLineReader(), ShapelyCrossings()),
         coordinate_use_case=validator,

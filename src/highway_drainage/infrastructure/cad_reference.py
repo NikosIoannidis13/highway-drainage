@@ -11,6 +11,8 @@ from ezdxf.filemanagement import readfile
 from ezdxf.math import Matrix44, Vec3
 from pyproj import CRS
 
+from highway_drainage.domain.crossings import DrawingUnits
+
 
 def _missing_crs(path: Path) -> ValueError:
     return ValueError(
@@ -66,6 +68,7 @@ class CadFrame:
     z_factor: float
     matrix: Matrix44 | None
     assumed: bool = False
+    unit_summary: str = ""
 
     def point(self, value: Vec3) -> Vec3:
         if self.matrix is not None:
@@ -74,7 +77,11 @@ class CadFrame:
         return Vec3(value.x * self.xy_factor, value.y * self.xy_factor, value.z)
 
 
-def cad_frame(document: Drawing, path: Path, declared: str, fallback: str = "") -> CadFrame:
+def cad_frame(
+    document: Drawing, path: Path, declared: str, fallback: str = "",
+    coordinate_units: DrawingUnits = DrawingUnits.HEADER,
+) -> CadFrame:
+    coordinate_units = DrawingUnits(coordinate_units)
     geo = document.modelspace().get_geodata()
     matrix = None
     detected = ""
@@ -108,11 +115,32 @@ def cad_frame(document: Drawing, path: Path, declared: str, fallback: str = "") 
         )
     unit_code = int(document.units)
     try:
-        metres = (
-            float(units.conversion_factor(InsertUnits(unit_code), InsertUnits.Meters))
-            if unit_code
-            else float(crs.axis_info[0].unit_conversion_factor)
+        header_units = InsertUnits(unit_code).name
+    except ValueError:
+        header_units = f"unknown ({unit_code})"
+    overrides = {
+        DrawingUnits.METRES: 1.0, DrawingUnits.MILLIMETRES: 0.001,
+        DrawingUnits.FEET: 0.3048, DrawingUnits.US_SURVEY_FEET: 1200 / 3937,
+        DrawingUnits.INCHES: 0.0254,
+    }
+    if geo is not None and coordinate_units not in (DrawingUnits.HEADER, DrawingUnits.SOURCE_CRS):
+        raise ValueError(
+            f"{path.name}: embedded GEODATA defines coordinate placement and units. "
+            "Use 'Coordinates already in source CRS' or 'Use DXF header units' "
+            "to retain its georeferencing."
         )
+    try:
+        if coordinate_units == DrawingUnits.SOURCE_CRS:
+            metres = float(crs.axis_info[0].unit_conversion_factor)
+        elif coordinate_units in overrides:
+            metres = overrides[coordinate_units]
+        elif coordinate_units == DrawingUnits.HEADER:
+            metres = (
+                float(units.conversion_factor(InsertUnits(unit_code), InsertUnits.Meters))
+                if unit_code else float(crs.axis_info[0].unit_conversion_factor)
+            )
+        else:
+            raise ValueError(f"Unknown coordinate units: {coordinate_units}")
     except (ValueError, TypeError, IndexError) as exc:
         if unit_code in (21, 22, 23, 24):
             metres = (1200 / 3937) * {21: 1, 22: 1 / 12, 23: 3, 24: 5280}[unit_code]
@@ -120,12 +148,19 @@ def cad_frame(document: Drawing, path: Path, declared: str, fallback: str = "") 
             raise ValueError(f"{path.name}: unsupported drawing units ({unit_code}).") from exc
     # GEODATA's matrix already includes drawing-to-CRS XY scaling and placement.
     z_metres = float(geo.dxf.vertical_unit_scale) if geo is not None else metres
+    xy_factor = metres / crs.axis_info[0].unit_conversion_factor
+    operation = (
+        "embedded GEODATA placement and units applied" if geo is not None else
+        f"XY scale {xy_factor:.12g} before CRS transformation "
+        f"({coordinate_units.value.replace('_', ' ')})"
+    )
     return CadFrame(
         crs,
-        metres / crs.axis_info[0].unit_conversion_factor,
+        xy_factor,
         z_metres,
         matrix,
         assumed=not detected and not declared.strip(),
+        unit_summary=f"DXF header: {header_units}; {operation}.",
     )
 
 

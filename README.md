@@ -1,5 +1,37 @@
 # Highway Drainage
 
+## Classify culvert inlets and outlets
+
+After finding crossings, click the **Role** dropdown in a crossing's table row and
+choose **Inlet**, **Outlet**, or **Unassigned**. The choice applies to that row only,
+updates the map colour immediately, and supports **Undo**. Only inlet points are
+used for inlet validation, pour-point selection, and catchments.
+
+For group selection, click **Review inlets/outlets** above the preview to open
+**Drainage View**. In its preview toolbar choose
+**Select points**, then click a point or drag a rectangle around a group. Hold
+**Shift** to add points to the selection. Click **Mark as inlet**, **Mark as outlet**,
+or **Clear classification**. Points are green for inlets, blue for outlets, grey
+for unassigned, with a yellow outline around selected points. Associated culvert
+lines are highlighted, and the crossing table shows each point's role. **Pan**
+restores drag-to-pan; wheel zoom remains available in both modes.
+
+**Undo** reverses the last classification or manual placement (up to 50 actions).
+Use **Add inlet point**, choose its associated culvert, and click the actual inlet
+location when it does not coincide with an intersection. Manual placement uses
+the project coordinates and does not snap or alter the source DXF. Point editing
+switches satellite imagery to the drawing preview, where these controls operate.
+
+In **Inlet validation & pour points**, only classified inlets are validated and
+snapped. Only their pour points can proceed to catchment delineation. Outlet and
+unassigned points stay visible but are excluded from catchments. Changing roles,
+adding an inlet or undoing a review action clears previous snapping and catchment
+results. Classifications survive preview switching, snapping and DEM background
+updates within the current crossing result; recomputing or changing crossing
+inputs starts a new review. There is no automatic session restore after closing
+the app. Shapefile point exports retain roles in `culv_role` and manual-placement
+status in `manual`.
+
 Windows / VS Code desktop application with terrain DXF input, validated terrain-model
 construction, tiled GeoTIFF export, highway/culvert crossing extraction, outlet
 validation/snapping, and pyflwdir catchment delineation.
@@ -75,8 +107,35 @@ space between forms and preview. Only one preview scene is visible at a time.
   adds the loaded georeferenced raster underneath; it is off by default and affects
   Drainage View only. The choice persists while changing views, refreshing results,
   or loading another TIFF during the session. Hidden raster extents are excluded
-  from zoom to extents. Table/map selection
+  from zoom to extents. After **Open ready raster TIFF** and crossing extraction,
+  the cached raster layer is restored if needed without reopening the file.
+  Clicking **Show raster background** to enable it fits the full TIFF extent,
+  even when DXFs lie elsewhere. It does not include distant DXFs in that fit or
+  change their coordinates. Missing preview data and alignment issues are explained
+  in the tooltip. Disabling the background keeps the current camera.
+  Normal overlay refreshes and view switches preserve the current camera. Table/map selection
   remains linked. Catchment holes and separate components are retained.
+
+In **Highway Culvert Crossings**, **Show input coordinate systems (CRS)** displays
+the raster CRS, each DXF's source CRS, and the preview/crossings CRS. The summary
+is visible by default. After extraction, DXF entries identify detected, manually
+entered, or assumed project CRSs; selecting a replacement file clears the old
+CRS summary until the next extraction.
+
+Each DXF has a **coordinate units** selector. The default, **Coordinates already
+in source CRS**, keeps survey coordinate numbers unchanged before CRS reprojection;
+it avoids unintended scaling from an incorrect inches/feet DXF header. Choose
+**Use DXF header units**, or explicit metres, millimetres, feet, US survey feet or
+inches, for drawings that require conversion. Embedded GEODATA placement is retained;
+explicit unit overrides cannot replace it. Changing the file resets this choice.
+The CRS summary and extraction report show the header units and applied XY scale.
+The same choice is used when exporting highway or culvert lines directly.
+
+When a raster is loaded, each extracted DXF extent is checked separately against
+the raster before calculating intersections. A drawing entirely outside the raster
+stops extraction with the filename, extents and unit conversion, so incorrect
+coordinates cannot silently produce distant crossings. Extent overlap is an initial
+check, not proof that the chosen CRS/units or raster data coverage are correct.
 
 DEM display snapshots and mask outlines load in existing worker threads when a
 result becomes available. The application retains them in memory. Switching the
@@ -188,16 +247,19 @@ Non-finite XYZ, invalid boundaries, degenerate faces and zero-length/vertical XY
 are rejected. Zero and negative Z are allowed; all-zero features are flagged for
 review because DXF may have defaulted absent elevation components to zero. Optional
 minimum/maximum Z limits are supported by the use-case request (not yet exposed in
-the form). Shared exact XY positions with different Z values are reported as errors,
-without averaging. Conflicting features remain available for inspection, so a dataset
+the form). Shared exact XY positions with different Z values are reported without
+averaging. Face-to-face differences are reviewed by the face audit using its declared
+elevation tolerance; other geometry conflicts remain import errors.
+Conflicting features remain available for inspection, so a dataset
 with `has_errors` must not be used by future surface processing.
 
 Exact duplicate geometry is detected within and across files, including reversed
 lines and reversed/rotated faces and closed rings. The first geometry is retained;
 findings link each duplicate's provenance to the original. Conflicting duplicate
 roles are errors. This is deliberately exact matching after CRS normalization:
-near-duplicates, differently segmented lines, interior surface overlaps and numeric
-reprojection differences are not merged. No tolerance-based coordinate welding is
+near-duplicates, differently segmented lines and numeric reprojection differences
+are not merged by duplicate detection. Face overlaps undergo the separate audit below.
+No tolerance-based coordinate welding is
 performed, so triangle coordinates are not moved.
 
 The import report retains all findings and domain geometry in memory; the UI displays the
@@ -219,11 +281,12 @@ Output elevations may be metres or international feet; the vertical datum is unc
 
 Two model paths are selected from the actual input:
 
-- **Existing faces:** preserve every valid triangle and its vertex order. Planar quads
+- **Existing faces:** preserve valid triangles except for accepted overlap cleanup. Planar quads
   are triangulated without new vertices, using a 1e-6 metre elevation agreement check.
-  Nonplanar quads must be explicitly triangulated in CAD. Interior face overlaps and
-  discontinuities along shared edges are rejected, even if raster cell centres would
-  miss the defect. A declared breakline must already consist of mesh edges with matching
+  Nonplanar quads must be explicitly triangulated in CAD. The import audit checks
+  interior face overlaps and shared-edge discontinuities, even if raster cell centres
+  would miss the defect. Unresolved findings block export before model construction.
+  A declared breakline must already consist of mesh edges with matching
   endpoint elevations. Otherwise the user must embed it in the source mesh or split it
   at existing mesh vertices; the exporter never silently rebuilds the surface.
 - **Linework reconstruction:** require one explicit closed outer boundary. Breakline and
@@ -234,6 +297,58 @@ Two model paths are selected from the actual input:
   unnoded intersections, overlaps and out-of-boundary segments are rejected with guidance.
 
 One boundary can also clip the raster from existing faces without changing the mesh.
+
+### Face overlap review and cleanup
+
+The GUI now defaults to **Overlapping 3D faces → Use midpoint elevation and continue**.
+At each raster cell centre covered by faces, its elevation is `(lowest + highest) / 2`.
+With two faces this is their arithmetic average; with three or more it is the midpoint
+of the extreme elevations, independent of triangle order or repeated coverage at mesh
+edges. Single-face cells keep their original interpolated elevation. In combined mode,
+only face elevations enter the midpoint; polylines still fill only cells without faces.
+The midpoint is computed during tiled raster sampling, without changing the source DXFs.
+It does not smooth the joins to adjacent single-face terrain.
+
+Overlaps and shared-edge elevation disagreements are reported but do not block builds
+in midpoint mode, regardless of area or height difference. Invalid geometry, nonplanar
+quads, incomplete audits and resource limits still block builds. Breakline enforcement
+requires strict mode. GeoTIFF metadata and CSV reports record the chosen overlap policy.
+To switch an already imported dataset, select midpoint and click **Recheck faces**.
+
+The following tolerance-based cleanup rules apply when **Strict checks and
+tolerance-based cleanup** is selected.
+
+**Import and validate terrain** now includes a bounded, cancellable face topology audit.
+Open **DEM / GeoTIFF → Build from DXF terrain → Review face overlaps** for a paged
+report and a preview of each face pair, with source filenames, layers, DXF handles,
+overlap area, percentage of each triangle covered, and maximum elevation difference.
+Blue/green outlines identify the two faces; red highlights the overlap or shared edge.
+Use **Zoom to overlap** for narrow slivers and **Export full CSV report** for all
+findings, including findings outside the current page/filter. Quad findings identify
+the source face and report metrics for its individual triangulated pieces.
+
+The two explicit limits default to **0.000001 m²** for partial overlaps and
+**0.000001 m** for elevation differences. Fully covered, agreeing triangles can be
+removed regardless of area. Partial overlaps are trimmed only when both limits pass.
+Among accepted overlapping triangles the larger triangle supplies the overlap;
+source path and handle break equal-area ties. Each retained non-overlapping portion
+keeps its source plane. New clipping vertices receive Z from that plane. No XY
+rounding, averaging, or global highest/lowest surface selection is performed.
+Original DXFs are unchanged. Cleanup is applied only after the whole audit passes.
+
+Elevation conflicts, excessive partial overlaps, nonplanar quads and incomplete
+audits block the build button. Correct meaningful conflicts in CAD and reimport.
+Change tolerances only when justified by the survey accuracy, then select
+**Recheck faces** to audit already loaded geometry without reading the DXFs again.
+Changing tolerances or terrain inputs invalidates the previous check. Cancelled or
+failed rechecks do not authorize a build. The completed audit and cleaned triangles
+are reused during DEM construction, including the authoritative face surface in
+combined mode; sampled polylines never override unresolved face conflicts.
+
+The audit checks at most 5 million face vertices, 10 million candidate pairs and
+100,000 findings. If a limit is reached, the report is explicitly incomplete and
+building remains blocked; clip/split the source dataset. Raster resolution cannot
+repair overlapping input surfaces.
 Multiple boundaries and hole semantics remain unsupported. Unassigned or skipped
 unsupported input entities must be resolved or explicitly excluded before modeling.
 No convex-hull filling across missing survey coverage and no line densification are used.
@@ -546,7 +661,7 @@ Ruff handles linting, import ordering and formatting; mypy checks types.
 
 ### Outlet coordinate validation
 
-After extracting crossings, open **Outlet coordinate validation**, select the DEM,
+After extracting crossings, open **Inlet validation & pour points**, select the DEM,
 and click **Validate outlet coordinates**. A successful DEM export also fills this
 path. The report includes every candidate's unchanged X/Y, source identifiers,
 integer and fractional row/column, cell state, affine round-trip and ordering checks.
@@ -593,7 +708,7 @@ and [raster masks documentation](https://rasterio.readthedocs.io/en/stable/topic
 
 ### Selecting outlet cells
 
-In **Outlet coordinate validation**, select a DEM, choose a snapping mode, enter
+In **Inlet validation & pour points**, select a DEM, choose a snapping mode, enter
 the maximum distance in metres, then click **Select pour points**. This reruns
 coordinate validation against the current DEM. Snapping does not modify the DXF,
 DEM, geometric crossing, or its original pixel record.
@@ -619,7 +734,7 @@ Accumulation must be derived from the intended hydrologic DEM and have exactly
 the same CRS, transform and dimensions. The application checks alignment and
 valid values, but cannot establish the provenance of an arbitrary supplied raster.
 Before selecting pour points, click **Generate flow direction and accumulation**
-in **Outlet coordinate validation**. This requires only a loaded or generated DEM;
+in **Inlet validation & pour points**. This requires only a loaded or generated DEM;
 no crossings or prepared outlets are required. Choose a parent folder: results are
 written to `<DEM name>_flow` beneath it. Select **Large DEM** in the flow processing
 budget if appropriate for your machine and raster size. Existing results require
@@ -666,7 +781,7 @@ Outlet domain records, use case and Rasterio adapter live in each layer's
 
 Use **Export crossings as Shapefile (.shp)** in the crossing tab to save all
 computed intersection candidates at their original coordinates. After selecting
-pour points, use **Export selected outlets as Shapefile (.shp)** in the outlet
+pour points, use **Export inlet pour points as Shapefile (.shp)** in the outlet
 coordinate tab to save the selected cell-center locations. Rejected/unselected
 outlets are excluded; separate outlets sharing one cell keep their separate IDs.
 

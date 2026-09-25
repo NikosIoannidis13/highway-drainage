@@ -4,13 +4,16 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QPolygonF
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem
 
+from highway_drainage.domain.crossings import CrossingResult
 from highway_drainage.domain.outlets import SnapResult
 from highway_drainage.presentation.crossing_view import CrossingView
 
 
 class OutletView(CrossingView):
-    def show_outlets(self, result: SnapResult) -> None:
-        self.show_result(result.validation.crossings)
+    def show_outlets(self, result: SnapResult, crossings: CrossingResult | None = None) -> None:
+        self.show_result(
+            crossings or result.validation.crossings, preserve_camera=crossings is not None,
+        )
         scene = self.scene()
         assert scene is not None
         ox, oy = self._origin

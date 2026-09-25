@@ -1,5 +1,6 @@
 """Reusable synthetic builders; no test functions."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from highway_drainage.domain.crossings import (
     CrossingPoint,
     CrossingResult,
     LineSource,
+    PointRole,
 )
 from highway_drainage.infrastructure.coordinates import RasterCoordinateInspector
 
@@ -31,6 +33,11 @@ def candidates(*xy: tuple[float, float]) -> CrossingResult:
         LineSource(Path("highway.dxf"), "EPSG:32634"),
         LineSource(reference.path, "EPSG:32634"),
     )
+
+
+def as_inlets(result: CrossingResult) -> CrossingResult:
+    """Fixture for workflows whose inlet locations have already been reviewed."""
+    return replace(result, points=tuple(replace(p, role=PointRole.INLET) for p in result.points))
 
 
 DEFAULT_TRANSFORM = Affine(2, 0, 100, 0, -3, 200)

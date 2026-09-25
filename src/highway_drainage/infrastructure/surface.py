@@ -16,7 +16,8 @@ from highway_drainage.domain.dem import (
     TerrainModel,
     Triangle,
 )
-from highway_drainage.domain.terrain import LineRole, Point3D, TerrainFeature
+from highway_drainage.domain.terrain import FaceAuditOptions, LineRole, Point3D, TerrainFeature
+from highway_drainage.infrastructure.face_audit import FaceAuditor
 from highway_drainage.infrastructure.terrain import _projected_metres
 
 type XY = tuple[float, float]
@@ -115,6 +116,26 @@ class SurfaceBuilder:
         budget.check()
         _projected_metres(request.dataset.crs_wkt)
         features = request.dataset.features
+        faces = [f for f in features if f.is_face]
+        if faces and any(f.role in (LineRole.CONTOUR, LineRole.TERRAIN_SAMPLES)
+                         for f in features if not f.is_face):
+            raise ValueError(
+                "Sample interpolation cannot be combined with faces in single-surface mode. "
+                "Choose '3D faces with polyline gap filling' to build the two surfaces."
+            )
+        audit = request.dataset.face_audit
+        if faces:
+            if audit is None or not audit.matches(features):
+                audited = FaceAuditor(
+                    max_checks=request.limits.max_geometry_checks,
+                    max_vertices=request.limits.max_input_vertices,
+                    max_triangles=request.limits.max_triangles,
+                ).audit(request.dataset, FaceAuditOptions(), cancel, lambda _: None)
+                audit = audited.face_audit
+            assert audit is not None
+            audit.require_ready()
+            if len(audit.cleaned_triangles) > request.limits.max_triangles:
+                raise ResourceLimitError("Triangle limit exceeded.", plan, "Split the terrain.")
         boundaries = [f for f in features if f.role == LineRole.BOUNDARY]
         if len(boundaries) > 1:
             raise ValueError(
@@ -131,38 +152,25 @@ class SurfaceBuilder:
 
             return contour_model(request, plan, budget, boundary, clip)
         points: dict[XY, Point3D] = {}
+        midpoint = bool(faces and audit and audit.options.overlap_policy == "midpoint")
+        if midpoint and any(f.role == LineRole.BREAKLINE for f in features):
+            raise ValueError("Midpoint face elevations cannot enforce breaklines; use strict mode.")
         for feature in features:
             budget.check()
             for point in feature.vertices:
                 if not all(isfinite(v) for v in (point.x, point.y, point.z)):
                     raise ValueError("Model coordinates must be finite.")
                 previous = points.get(xy(point))
-                if previous is not None and abs(previous.z - point.z) > Z_TOLERANCE:
+                tolerance = audit.options.max_z_difference if faces and audit else Z_TOLERANCE
+                if (previous is not None and abs(previous.z - point.z) > tolerance
+                        and not (midpoint and feature.is_face)):
                     raise ValueError("Terrain vertices disagree in elevation at the same XY.")
                 points[xy(point)] = point
-        faces = [f for f in features if f.is_face]
         breaks = [f for f in features if f.role == LineRole.BREAKLINE]
         triangles: list[Triangle] = []
         if faces:
-            for face in faces:
-                budget.check()
-                polygon = Polygon([xy(v) for v in face.vertices])
-                if not polygon.is_valid or not isfinite(polygon.area) or polygon.area <= 0:
-                    raise ValueError("A face is degenerate or invalid in XY.")
-                if len(face.vertices) == 3:
-                    triangles.append((face.vertices[0], face.vertices[1], face.vertices[2]))
-                elif len(face.vertices) == 4:
-                    pieces = _triangulate(polygon, points)
-                    if not pieces or any(
-                        abs(elevation(pieces[0], v.x, v.y) - v.z) > Z_TOLERANCE
-                        for v in face.vertices
-                    ):
-                        raise ValueError(
-                            "Nonplanar 3DFACE quad: triangulate it explicitly in CAD first."
-                        )
-                    triangles.extend(pieces)
-                else:
-                    raise ValueError("A surface face must have three or four vertices.")
+            assert audit is not None
+            triangles = list(audit.cleaned_triangles)
             edges = {
                 edge_key(a, b)
                 for t in triangles
@@ -177,7 +185,8 @@ class SurfaceBuilder:
                             "Split at mesh vertices or supply a mesh with this constraint. "
                             "Existing triangles will not be silently rebuilt."
                         )
-            method = "preserved_faces"
+            method = ("midpoint_faces" if midpoint else
+                      "cleaned_faces" if audit.findings else "preserved_faces")
         else:
             if boundary is None or clip is None:
                 raise ValueError(
@@ -245,11 +254,13 @@ class SurfaceBuilder:
             method = "constrained_regions"
         if not triangles:
             raise ValueError("No terrain triangles could be constructed.")
-        _validate_mesh(triangles, budget)
+        if not faces:
+            _validate_mesh(triangles, budget)
         return TerrainModel(
             tuple(triangles),
             request.dataset.crs_wkt,
             request.dataset.vertical_reference,
             boundary.vertices if boundary else None,
             method,
+            face_overlap_policy="midpoint" if midpoint else "strict",
         )

@@ -9,7 +9,9 @@ from highway_drainage.infrastructure.project_raster import RasterProjectReader
 from highway_drainage.presentation.main_window import MainWindow
 
 
-def test_combine_without_dxf_sets_active_dem_and_restores_controls(qtbot: QtBot, tmp_path: Path):
+def test_combine_without_dxf_sets_active_dem_and_restores_controls(
+    qtbot: QtBot, tmp_path: Path,
+) -> None:
     primary, filler, output = (tmp_path / name for name in ("a.tif", "b.tif", "out.tif"))
     for path, values in ((primary, [[0., -9999.]]), (filler, [[8., 9.]])):
         with rasterio.open(path, "w", driver="GTiff", count=1, dtype="float32",

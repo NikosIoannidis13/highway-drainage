@@ -191,9 +191,11 @@ class TerrainNormalizer:
                 if previous is not None and previous[0] != v.z:
                     issues.append(
                         ImportIssue(
-                            "error",
-                            "z_conflict",
-                            "Shared XY has conflicting elevations; not averaged.",
+                            "warning" if feature.is_face else "error",
+                            "face_z_difference" if feature.is_face else "z_conflict",
+                            "Shared XY has conflicting elevations; not averaged. "
+                            + ("Face overlap audit must check the elevation tolerance."
+                               if feature.is_face else ""),
                             ref,
                             previous[1],
                         )

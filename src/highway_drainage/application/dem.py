@@ -23,6 +23,9 @@ def plan_dem(request: DemRequest) -> GridPlan:
     """Count first. No sample grid, GIS index or triangle arrays are allocated here."""
     if request.dataset.has_errors:
         raise ValueError("Resolve terrain import errors before generating a DEM.")
+    audit = request.dataset.face_audit
+    if audit is not None and audit.matches(request.dataset.features):
+        audit.require_ready()
     if request.surface_mode not in ("single", "faces_with_polyline_gaps"):
         raise ValueError("Choose single terrain or 3D faces with polyline gap filling.")
     if request.surface_mode == "single" and any(
@@ -116,6 +119,8 @@ def plan_dem(request: DemRequest) -> GridPlan:
                 nvertices += extra_samples
                 sample_vertices += extra_samples
     faces = sum(max(0, len(f.vertices) - 2) for f in request.dataset.features if f.is_face)
+    if audit is not None and audit.matches(request.dataset.features) and not audit.blocked:
+        faces = len(audit.cleaned_triangles)
     triangle_estimate = (
         # Face vertices already belong to preserved triangles. Only polyline samples
         # enter the fallback triangulation; boundary vertices only define clipping.
@@ -308,4 +313,5 @@ class GenerateDem:
             primary.triangles + fallback.triangles, primary.crs_wkt,
             primary.vertical_reference, fallback.boundary, "faces_with_polyline_gaps",
             primary_triangle_count=len(primary.triangles),
+            face_overlap_policy=primary.face_overlap_policy,
         )

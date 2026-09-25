@@ -1,9 +1,26 @@
 """Plan-view CAD geometry and crossing records, independent of Qt/ezdxf/Shapely."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 type XY = tuple[float, float]
+
+
+class PointRole(StrEnum):
+    UNCLASSIFIED = "unclassified"
+    INLET = "inlet"
+    OUTLET = "outlet"
+
+
+class DrawingUnits(StrEnum):
+    SOURCE_CRS = "source_crs"
+    HEADER = "header"
+    METRES = "metres"
+    MILLIMETRES = "millimetres"
+    FEET = "feet"
+    US_SURVEY_FEET = "us_survey_feet"
+    INCHES = "inches"
 
 
 @dataclass(frozen=True)
@@ -45,6 +62,8 @@ class LineSource:
     crs: str
     layers: tuple[str, ...] = ()  # empty means all modelspace layers
     fallback_crs: str = ""  # Explicit project assumption for unreferenced CAD.
+    units: DrawingUnits = DrawingUnits.HEADER
+    unit_summary: str = ""  # Resolved header units and applied conversion after import.
 
 
 @dataclass(frozen=True)
@@ -66,6 +85,7 @@ class CrossingRequest:
     working_crs: str
     curve_tolerance: float = 0.05  # metres in source drawing WCS
     limits: CrossingLimits = CrossingLimits()
+    raster_bounds: tuple[float, float, float, float] | None = None  # In working CRS.
 
 
 @dataclass(frozen=True)
@@ -85,6 +105,8 @@ class CrossingPoint:
     highways: tuple[CadReference, ...]
     endpoint_contact: bool
     approximated: bool
+    role: PointRole = PointRole.UNCLASSIFIED
+    manual: bool = False
 
 
 @dataclass(frozen=True)

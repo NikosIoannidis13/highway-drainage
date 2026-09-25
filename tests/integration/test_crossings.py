@@ -20,8 +20,9 @@ def test_line_crossing_retains_both_identifiers_and_ignores_z(tmp_path: Path) ->
     drain = culvert.modelspace().add_line((5, -2, 10), (5, 2, 10))
     request = request_for(tmp_path, highway, culvert)
     result = crossing_service().execute(request)
-    assert result.highway_source == request.highway
-    assert result.culvert_source == request.culverts
+    assert result.highway_source is not None and result.culvert_source is not None
+    assert replace(result.highway_source, unit_summary="") == request.highway
+    assert replace(result.culvert_source, unit_summary="") == request.culverts
     assert len(result.points) == 1
     point = result.points[0]
     assert (point.x, point.y) == (5, 0)

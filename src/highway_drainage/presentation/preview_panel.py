@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from highway_drainage.domain.preview import BoundaryPreview, RasterPreview
 from highway_drainage.presentation.navigation_view import NavigationView
 from highway_drainage.presentation.outlet_view import OutletView
+from highway_drainage.presentation.point_review_panel import PointReviewPanel
 from highway_drainage.presentation.raster_item import raster_item
 from highway_drainage.presentation.satellite_view import SatelliteView
 
@@ -44,6 +45,7 @@ class TerrainView(NavigationView):
 
 class PreviewPanel(QWidget):
     satellite_update_requested = Signal()
+    raster_background_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -54,6 +56,10 @@ class PreviewPanel(QWidget):
         self.mode.setAccessibleName("Preview mode")
         self.mode.addItems(["Terrain View", "Drainage View"])
         toolbar.addWidget(self.mode)
+        self.review_points_button = QPushButton("Review inlets/outlets")
+        self.review_points_button.setEnabled(False)
+        self.review_points_button.clicked.connect(self._review_points)
+        toolbar.addWidget(self.review_points_button)
         self.extents_button = QPushButton("Zoom to extents")
         self.extents_button.clicked.connect(self.fit_current)
         toolbar.addWidget(self.extents_button)
@@ -85,14 +91,22 @@ class PreviewPanel(QWidget):
         drainage = QWidget()
         drainage_layout = QVBoxLayout(drainage)
         self.drainage_view = OutletView()
+        self.point_review = PointReviewPanel(self.drainage_view)
+        drainage_layout.addWidget(self.point_review)
+        self.point_review.tool.currentIndexChanged.connect(self._point_tool_changed)
         self.show_raster_background = QCheckBox("Show raster background")
         self.show_raster_background.setToolTip("Display the loaded DEM beneath drainage results")
         self.show_raster_background.setEnabled(False)
-        self.show_raster_background.toggled.connect(self.drainage_view.set_raster_visible)
+        self.show_raster_background.toggled.connect(self._toggle_raster_background)
+        self.show_raster_background.clicked.connect(self._focus_raster_background)
         drainage_layout.addWidget(self.show_raster_background)
+        # A tooltip gives details without adding/removing rows and moving the map camera.
+        self.show_raster_background.setToolTip("Show the loaded TIFF and fit its full extent.")
         drainage_layout.addWidget(self.drainage_view, 1)
         legend = QLabel(
-            "Blue: highway · Orange: culverts · Red: crossings · Green rings: snapped outlets\n"
+            "Lines: blue highway, orange culverts. "
+            "Points: green inlet, blue outlet, grey unassigned.\n"
+            "Yellow outline: selected · Green rings: inlet pour points\n"
             "Grey: containing DEM pixels · Purple: catchment boundaries · North ↑"
         )
         legend.setWordWrap(True)
@@ -110,13 +124,48 @@ class PreviewPanel(QWidget):
         self.show_satellite.toggled.connect(self._select_view)
         self.show_raster_background.toggled.connect(self.satellite_update_requested)
         self.drainage_view.data_changed.connect(self.satellite_update_requested)
+        self.drainage_view.data_changed.connect(self._update_raster_status)
+        self.drainage_view.data_changed.connect(
+            lambda: self.review_points_button.setEnabled(self.drainage_view.result is not None)
+        )
         self.setMinimumWidth(350)
 
     def _select_view(self) -> None:
+        if self.show_satellite.isChecked():
+            self.point_review.tool.setCurrentIndex(0)
         self.stack.setCurrentIndex(
             2 if self.show_satellite.isChecked() else self.mode.currentIndex()
         )
         self.satellite_update_requested.emit()
+
+    def _toggle_raster_background(self, visible: bool) -> None:
+        if visible:
+            if self.drainage_view.snapshot is None and self.terrain_view.snapshot is not None:
+                self.drainage_view.set_raster(self.terrain_view.snapshot, preserve_camera=True)
+            self.raster_background_requested.emit()
+        self.drainage_view.set_raster_visible(visible)
+        self._update_raster_status()
+
+    def _focus_raster_background(self, checked: bool) -> None:
+        if checked:
+            self.drainage_view.fit_raster()
+        self._update_raster_status()
+
+    def _update_raster_status(self) -> None:
+        message = (self.drainage_view.raster_background_status()
+                   if self.show_raster_background.isChecked() else "")
+        self.show_raster_background.setToolTip(
+            message or "Show the loaded TIFF and fit its full extent."
+        )
+
+    def _review_points(self) -> None:
+        self.show_satellite.setChecked(False)
+        self.mode.setCurrentIndex(1)
+        self.point_review.tool.setCurrentIndex(1)
+
+    def _point_tool_changed(self) -> None:
+        if self.point_review.tool.currentData() != "pan":
+            self.show_satellite.setChecked(False)
 
     def fit_current(self) -> None:
         if self.show_satellite.isChecked():
@@ -139,6 +188,7 @@ class PreviewPanel(QWidget):
     def show_raster(self, preview: RasterPreview) -> None:
         self.terrain_view.show_raster(preview)
         self.drainage_view.set_raster(preview)
+        self.drainage_view.set_raster_visible(self.show_raster_background.isChecked())
         self.show_raster_background.setEnabled(True)
         self.terrain_info.setText(preview.information)
         self.satellite_update_requested.emit()

@@ -6,6 +6,7 @@ from threading import Event
 from typing import Protocol
 
 from highway_drainage.domain.terrain import (
+    FaceAuditOptions,
     ImportIssue,
     TerrainDataset,
     TerrainFeature,
@@ -28,10 +29,29 @@ class TerrainNormalizer(Protocol):
     ) -> TerrainDataset: ...
 
 
+class FaceAuditor(Protocol):
+    def audit(
+        self, dataset: TerrainDataset, options: FaceAuditOptions, cancel: Event,
+        progress: Callable[[str], None],
+    ) -> TerrainDataset: ...
+
+
 class ImportTerrain:
-    def __init__(self, reader: TerrainReader, normalizer: TerrainNormalizer) -> None:
+    def __init__(
+        self, reader: TerrainReader, normalizer: TerrainNormalizer,
+        face_auditor: FaceAuditor | None = None,
+    ) -> None:
         self._reader = reader
         self._normalizer = normalizer
+        self._face_auditor = face_auditor
+
+    def audit_faces(
+        self, dataset: TerrainDataset, options: FaceAuditOptions, cancel: Event,
+        progress: Callable[[str], None],
+    ) -> TerrainDataset:
+        if self._face_auditor is None:
+            raise ValueError("Face overlap validation is unavailable in this configuration.")
+        return self._face_auditor.audit(dataset, options, cancel, progress)
 
     def execute(
         self,
@@ -39,6 +59,7 @@ class ImportTerrain:
         cancel: Event | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> TerrainDataset:
+        request.face_options.validate()
         if not request.sources:
             raise ValueError("Select at least one DXF file.")
         if not request.vertical_reference.strip():
@@ -80,4 +101,7 @@ class ImportTerrain:
                         report(f"Validating {source.path.name}: {count:,} entities read")
                     yield feature
 
-        return self._normalizer.normalize(request, items(), token)
+        dataset = self._normalizer.normalize(request, items(), token)
+        if self._face_auditor is not None:
+            dataset = self.audit_faces(dataset, request.face_options, token, report)
+        return dataset

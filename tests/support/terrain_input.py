@@ -13,6 +13,7 @@ from highway_drainage.domain.terrain import (
     TerrainSource,
 )
 from highway_drainage.infrastructure.dxf import DxfTerrainReader
+from highway_drainage.infrastructure.face_audit import FaceAuditor
 from highway_drainage.infrastructure.terrain import TerrainNormalizer
 
 TRIANGLE = [(500000.0, 4200000.0, 10.0), (500010.0, 4200000.0, 11.0), (500000.0, 4200010.0, 12.0)]
@@ -30,7 +31,7 @@ def save(doc: Drawing, path: Path, role: LineRole = LineRole.UNASSIGNED) -> Terr
 
 
 def service() -> ImportTerrain:
-    return ImportTerrain(DxfTerrainReader(), TerrainNormalizer())
+    return ImportTerrain(DxfTerrainReader(), TerrainNormalizer(), FaceAuditor())
 
 
 def load(*sources: TerrainSource) -> TerrainDataset:

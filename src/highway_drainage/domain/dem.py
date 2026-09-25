@@ -79,6 +79,7 @@ class TerrainModel:
     method: str
     # In a priority model, these leading triangles are authoritative faces.
     primary_triangle_count: int | None = None
+    face_overlap_policy: str = "strict"
 
 
 @dataclass(frozen=True)

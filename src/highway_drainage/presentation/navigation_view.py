@@ -2,7 +2,7 @@
 
 import math
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
@@ -32,6 +32,10 @@ class NavigationView(QGraphicsView):
         bounds = visible[0].sceneBoundingRect()
         for item in visible[1:]:
             bounds = bounds.united(item.sceneBoundingRect())
+        self.fit_bounds(bounds)
+
+    def fit_bounds(self, bounds: QRectF) -> None:
+        """Frame a chosen extent with padding, without moving any scene items."""
         margin = max(bounds.width(), bounds.height(), 1.0) * 0.05
         bounds = bounds.adjusted(-margin, -margin, margin, margin)
         # A tight scene rectangle prevents dragging when the entire dataset fits.

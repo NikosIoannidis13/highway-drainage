@@ -32,10 +32,11 @@ class CoordinatePanel(QWidget):
 
     def __init__(self, view: OutletView | None = None) -> None:
         super().__init__()
+        self._shared_view = view is not None
         self.result: CoordinateReport | None = None
         self.snap_result: SnapResult | None = None
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Validate current crossing candidates against DEM band 1."))
+        layout.addWidget(QLabel("Validate classified culvert inlets against DEM band 1."))
         row = QHBoxLayout()
         self.dem_path = QLineEdit()
         self.dem_path.setPlaceholderText("Select DEM GeoTIFF")
@@ -52,7 +53,7 @@ class CoordinatePanel(QWidget):
         flow_form = QFormLayout()
         flow_form.addRow("Flow processing budget", self.flow_profile)
         layout.addLayout(flow_form)
-        self.validate_button = QPushButton("Validate outlet coordinates")
+        self.validate_button = QPushButton("Validate inlet coordinates")
         self.validate_button.clicked.connect(self.validate_requested)
         layout.addWidget(self.validate_button)
         form = QFormLayout()
@@ -68,20 +69,20 @@ class CoordinatePanel(QWidget):
         self.flow_threshold = QLineEdit("1")
         self.flow_units = QLineEdit("cells")
         form.addRow("Snapping mode", self.snap_mode)
-        form.addRow("Maximum distance from crossing (m)", self.snap_distance)
+        form.addRow("Maximum distance from inlet (m)", self.snap_distance)
         form.addRow("Aligned flow accumulation GeoTIFF", flow_row)
         form.addRow("Minimum accumulation", self.flow_threshold)
         form.addRow("Accumulation units (as supplied)", self.flow_units)
         layout.addLayout(form)
-        self.snap_button = QPushButton("Select pour points")
+        self.snap_button = QPushButton("Select inlet pour points")
         self.snap_button.clicked.connect(self.snap_requested)
         layout.addWidget(self.snap_button)
-        self.export_button = QPushButton("Export selected outlets as Shapefile (.shp)")
+        self.export_button = QPushButton("Export inlet pour points as Shapefile (.shp)")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_requested)
         layout.addWidget(self.export_button)
         legend = QLabel(
-            "Red: geometric crossing; grey: containing DEM pixel; green ring: pour point. "
+            "Green point: culvert inlet; grey outline: DEM pixel; green ring: pour point. "
             "Nearest-cell results are provisional. Review flow-based selections against culverts."
         )
         legend.setWordWrap(True)
@@ -123,13 +124,13 @@ class CoordinatePanel(QWidget):
             self.flow_units.text(),
         )
 
-    def show_snapping(self, result: SnapResult) -> None:
+    def show_snapping(self, result: SnapResult, crossings: CrossingResult | None = None) -> None:
         self.show_result(result.validation)
         self.snap_result = result
         self.export_button.setEnabled(any(
             o.pour_point is not None and o.status != "rejected" for o in result.outlets
         ))
-        self.outlet_view.show_outlets(result)
+        self.outlet_view.show_outlets(result, crossings)
         lines = [
             "\nPOUR POINT SELECTION",
             f"Mode={result.request.mode.value}; maximum distance={result.request.max_distance} m",
@@ -162,7 +163,9 @@ class CoordinatePanel(QWidget):
         self.export_button.setEnabled(False)
         self.result = None
         self.snap_result = None
-        self.outlet_view.clear()
+        # The main window refreshes the shared drawing while preserving its camera.
+        if not self._shared_view:
+            self.outlet_view.clear()
         self.report.clear()
         self.invalidated.emit()
 

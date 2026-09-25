@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -18,12 +19,15 @@ from PySide6.QtWidgets import (
 )
 
 from highway_drainage.domain.dem import DemRequest, Extent
-from highway_drainage.domain.terrain import TerrainDataset
+from highway_drainage.domain.terrain import FaceAuditOptions, TerrainDataset
 
 
 class DemPanel(QWidget):
     export_requested = Signal()
     combine_requested = Signal()
+    audit_requested = Signal()
+    audit_review_requested = Signal()
+    audit_settings_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -52,6 +56,40 @@ class DemPanel(QWidget):
         )
         self.surface_note.setWordWrap(True)
         form.addRow(self.surface_note)
+        self.overlap_policy = QComboBox()
+        self.overlap_policy.addItem("Use midpoint elevation and continue", "midpoint")
+        self.overlap_policy.addItem("Strict checks and tolerance-based cleanup", "strict")
+        form.addRow("Overlapping 3D faces", self.overlap_policy)
+        self.overlap_area = QDoubleSpinBox()
+        self.overlap_z = QDoubleSpinBox()
+        for tolerance_field, maximum in ((self.overlap_area, 1e9), (self.overlap_z, 1000)):
+            tolerance_field.setDecimals(9)
+            tolerance_field.setRange(0, maximum)
+            tolerance_field.setValue(1e-6)
+            tolerance_field.valueChanged.connect(self.audit_settings_changed)
+        form.addRow("Maximum partial face overlap (m²)", self.overlap_area)
+        form.addRow("Maximum face elevation difference (m)", self.overlap_z)
+        self.overlap_policy.currentIndexChanged.connect(self._overlap_policy_changed)
+        self._overlap_policy_changed()
+        self.audit_status = QLabel("Face overlaps are checked during terrain import.")
+        self.audit_status.setWordWrap(True)
+        form.addRow(self.audit_status)
+        audit_note = QLabel(
+            "Midpoint uses (lowest + highest face elevation) / 2 at each overlapping cell. "
+            "Two faces give their average. Elevation conflicts are reported but do not block "
+            "building. Single-face areas retain their elevations. Tolerances apply only in "
+            "strict mode. Original DXFs are unchanged."
+        )
+        audit_note.setWordWrap(True)
+        form.addRow(audit_note)
+        audit_row = QHBoxLayout()
+        self.audit_button = QPushButton("Recheck faces")
+        self.audit_button.clicked.connect(self.audit_requested)
+        self.audit_review_button = QPushButton("Review face overlaps")
+        self.audit_review_button.clicked.connect(self.audit_review_requested)
+        audit_row.addWidget(self.audit_button)
+        audit_row.addWidget(self.audit_review_button)
+        form.addRow(audit_row)
         self.cell_size = QLineEdit("1.0")
         self.extent = QLineEdit()
         self.extent.setPlaceholderText(
@@ -87,7 +125,8 @@ class DemPanel(QWidget):
             "contour requires constant Z. "
             "Sampled line segments are not enforced mesh edges. Boundary Z is ignored for samples. "
             "Outside the boundary or sample hull remains NoData. "
-            "Existing triangles are preserved. Linework reconstruction requires one boundary and "
+            "Faces are preserved except for accepted overlap cleanup. "
+            "Linework reconstruction requires one boundary and "
             "breaklines forming closed, noded regions. Default limits: 100 million cells, "
             "5 million vertices, 10 million triangles and 24 GiB estimated working memory. "
             "Replacing an existing output requires confirmation."
@@ -141,6 +180,48 @@ class DemPanel(QWidget):
     def set_build_available(self, available: bool) -> None:
         self.build_page.setEnabled(available)
 
+    def face_options(self) -> FaceAuditOptions:
+        return FaceAuditOptions(
+            self.overlap_area.value(), self.overlap_z.value(),
+            str(self.overlap_policy.currentData()),
+        )
+
+    def _overlap_policy_changed(self) -> None:
+        strict = self.overlap_policy.currentData() == "strict"
+        self.overlap_area.setEnabled(strict)
+        self.overlap_z.setEnabled(strict)
+        self.audit_settings_changed.emit()
+
+    def set_face_options(self, options: FaceAuditOptions) -> None:
+        for widget in (self.overlap_policy, self.overlap_area, self.overlap_z):
+            widget.blockSignals(True)
+        self.overlap_policy.setCurrentIndex(self.overlap_policy.findData(options.overlap_policy))
+        self.overlap_area.setValue(options.max_overlap_area)
+        self.overlap_z.setValue(options.max_z_difference)
+        strict = options.overlap_policy == "strict"
+        self.overlap_area.setEnabled(strict)
+        self.overlap_z.setEnabled(strict)
+        for widget in (self.overlap_policy, self.overlap_area, self.overlap_z):
+            widget.blockSignals(False)
+
+    def show_face_status(self, dataset: TerrainDataset | None) -> None:
+        audit = dataset.face_audit if dataset else None
+        faces = bool(dataset and any(f.is_face for f in dataset.features))
+        current = bool(audit and dataset and audit.matches(dataset.features)
+                       and audit.options == self.face_options())
+        self.audit_review_button.setEnabled(current)
+        self.audit_button.setEnabled(faces)
+        self.export_button.setEnabled(bool(
+            dataset and not dataset.has_errors
+            and (not faces or (current and audit and not audit.blocked))
+        ))
+        self.audit_status.setText(
+            audit.summary() if current and audit else
+            "Face checks required. Click Recheck faces before building." if faces else
+            "No 3D faces to check." if dataset else
+            "Face overlaps are checked during terrain import."
+        )
+
     def _surface_mode_changed(self) -> None:
         combined = self.surface_mode.currentData() == "faces_with_polyline_gaps"
         self.surface_note.setText(
@@ -191,6 +272,12 @@ class DemPanel(QWidget):
             self.output.setText(path)
 
     def request(self, dataset: TerrainDataset) -> DemRequest:
+        if any(f.is_face for f in dataset.features):
+            audit = dataset.face_audit
+            if (audit is None or not audit.matches(dataset.features)
+                    or audit.options != self.face_options()):
+                raise ValueError("Click Recheck faces before building the DEM.")
+            audit.require_ready()
         extent: Extent | None = None
         if self.extent.text().strip():
             values = [float(value.strip()) for value in self.extent.text().split(",")]

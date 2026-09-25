@@ -127,6 +127,11 @@ class GeoTiffWriter:
                         max_contour_edge_m=str(request.max_contour_edge),
                         coverage="boundary_and_available_triangles_cell_centers",
                         primary_triangle_count=str(model.primary_triangle_count),
+                        face_overlap_policy=model.face_overlap_policy,
+                        face_overlap_rule=(
+                            "(minimum + maximum face Z at cell centre) / 2"
+                            if model.face_overlap_policy == "midpoint" else "validated face surface"
+                        ),
                     )
                     for row in range(0, plan.height, tile):
                         for col in range(0, plan.width, tile):
@@ -138,6 +143,9 @@ class GeoTiffWriter:
                             )
                             data = np.full((height, width), nodata, dtype=np.float32)
                             occupied = np.zeros((height, width), dtype=np.bool_)
+                            midpoint = model.face_overlap_policy == "midpoint"
+                            face_low = np.full((height, width), np.inf) if midpoint else None
+                            face_high = np.full((height, width), -np.inf) if midpoint else None
                             footprint = box(
                                 xmin + col * size,
                                 ymax - (row + height) * size,
@@ -175,7 +183,19 @@ class GeoTiffWriter:
                                 # Shared edge cells may be sampled twice; mesh validation has
                                 # already checked that adjacent planes agree at their junction.
                                 fill = inside & ~mask
-                                patch[fill] = values[fill].astype(np.float32)
+                                is_face = (model.primary_triangle_count is None
+                                           or i < model.primary_triangle_count)
+                                if midpoint and is_face:
+                                    assert face_low is not None and face_high is not None
+                                    lows = face_low[top-row:bottom-row, left-col:right-col]
+                                    highs = face_high[top-row:bottom-row, left-col:right-col]
+                                    lows[inside] = np.minimum(lows[inside], values[inside])
+                                    highs[inside] = np.maximum(highs[inside], values[inside])
+                                    patch[inside] = (lows[inside] / 2 + highs[inside] / 2).astype(
+                                        np.float32
+                                    )
+                                else:
+                                    patch[fill] = values[fill].astype(np.float32)
                                 mask[fill] = True
                                 if model.primary_triangle_count is not None:
                                     if i < model.primary_triangle_count:

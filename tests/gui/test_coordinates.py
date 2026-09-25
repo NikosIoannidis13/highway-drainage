@@ -7,13 +7,13 @@ from pytestqt.qtbot import QtBot
 from highway_drainage.application.coordinates import ValidateCoordinates
 from highway_drainage.infrastructure.coordinates import RasterCoordinateInspector
 from highway_drainage.presentation.main_window import MainWindow
-from tests.support.coordinates import candidates, raster
+from tests.support.coordinates import as_inlets, candidates, raster
 
 
 def test_gui_validation_and_invalidation(qtbot: QtBot, tmp_path: Path) -> None:
     window = MainWindow(coordinate_use_case=ValidateCoordinates(RasterCoordinateInspector()))
     qtbot.addWidget(window)
-    window.crossing_panel.show_result(candidates((103, 192.5), (110, 195)))
+    window.crossing_panel.show_result(as_inlets(candidates((103, 192.5), (110, 195))))
     panel = window.coordinate_panel
     panel.dem_path.setText(str(raster(tmp_path)))
     panel.validate_button.click()

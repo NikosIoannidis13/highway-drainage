@@ -11,7 +11,7 @@ from highway_drainage.domain.coordinates import CoordinateRequest
 from highway_drainage.domain.hydrology import HydrologyRequest
 from highway_drainage.domain.outlets import SnapRequest
 from highway_drainage.infrastructure.hydrology import PyFlwdirHydrology
-from tests.support.coordinates import candidates
+from tests.support.coordinates import as_inlets, candidates
 from tests.support.outlets import service as outlet_service
 
 
@@ -38,7 +38,7 @@ def chain(tmp_path: Path) -> HydrologyRequest:
         dst.write(data, 1)
         dst.set_band_unit(1, "m")
     # Channel centers: upstream/middle/downstream; duplicate downstream; rejected far outside.
-    points = candidates((107, 197), (111, 197), (111, 197), (999, 999))
+    points = as_inlets(candidates((107, 197), (111, 197), (111, 197), (999, 999)))
     prepared = outlet_service().execute(
         SnapRequest(CoordinateRequest(path, points), max_distance=0)
     )

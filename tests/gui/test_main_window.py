@@ -121,12 +121,12 @@ def test_crossing_map_table_selection_and_invalidation(qtbot: QtBot, tmp_path: P
     assert b.y > a.y
     assert panel.view.markers[b.identifier].pos().y() < panel.view.markers[a.identifier].pos().y()
     panel.table.selectRow(0)
-    assert panel.view.markers[a.identifier].brush().color().name() == "#fde047"
+    assert panel.view.markers[a.identifier].pen().color().name() == "#facc15"
     panel.view.fit_data()
     marker_position = panel.view.mapFromScene(panel.view.markers[b.identifier].scenePos())
     QTest.mouseClick(panel.view.viewport(), Qt.MouseButton.LeftButton, pos=marker_position)
     assert panel.table.currentRow() == 1
-    assert panel.view.markers[b.identifier].brush().color().name() == "#fde047"
+    assert panel.view.markers[b.identifier].pen().color().name() == "#facc15"
     panel.tolerance.setText("0.1")
     assert panel.result is None
     assert not panel.view.markers

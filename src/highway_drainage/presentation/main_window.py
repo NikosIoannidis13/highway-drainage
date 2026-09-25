@@ -46,12 +46,13 @@ from highway_drainage.application.point_export import (
     line_export,
     outlet_export,
 )
+from highway_drainage.application.point_review import PointReview, inlet_candidates
 from highway_drainage.application.preview import PreviewReader
 from highway_drainage.application.project_raster import ProjectRaster, ProjectRasterReader
 from highway_drainage.application.satellite import SatelliteBuilder, SatelliteRequest
 from highway_drainage.application.terrain import ImportTerrain
 from highway_drainage.domain.coordinates import CoordinateReport, CoordinateRequest
-from highway_drainage.domain.crossings import CrossingResult
+from highway_drainage.domain.crossings import CrossingResult, PointRole
 from highway_drainage.domain.dem import DemResult
 from highway_drainage.domain.hydrology import FlowRequest, HydrologyResult
 from highway_drainage.domain.outlets import SnapMode, SnapResult
@@ -66,6 +67,7 @@ from highway_drainage.presentation.dem_panel import DemPanel
 from highway_drainage.presentation.dem_worker import DemWorker
 from highway_drainage.presentation.earth_launcher import open_google_earth
 from highway_drainage.presentation.earth_worker import EarthPreviewWorker
+from highway_drainage.presentation.face_review import FaceReviewDialog
 from highway_drainage.presentation.flow_worker import FlowWorker
 from highway_drainage.presentation.hydrology_panel import HydrologyPanel
 from highway_drainage.presentation.hydrology_worker import HydrologyWorker
@@ -74,7 +76,7 @@ from highway_drainage.presentation.point_export_worker import PointExportWorker
 from highway_drainage.presentation.preview_panel import PreviewPanel
 from highway_drainage.presentation.raster_worker import RasterWorker
 from highway_drainage.presentation.task_progress import TaskProgress
-from highway_drainage.presentation.terrain_worker import TerrainWorker
+from highway_drainage.presentation.terrain_worker import FaceAuditWorker, TerrainWorker
 
 _SUPPLIED_ELEVATIONS = "Survey elevations as supplied"
 
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
             RasterWorker
             | CombineWorker
             | TerrainWorker
+            | FaceAuditWorker
             | DemWorker
             | CrossingWorker
             | CoordinateWorker
@@ -130,6 +133,7 @@ class MainWindow(QMainWindow):
         self._cancel = Event()
         self._closing = False
         self.dataset: TerrainDataset | None = None
+        self._point_review: PointReview | None = None
         self.setWindowTitle("Highway Drainage")
         self.resize(1100, 800)
         root = QWidget()
@@ -202,6 +206,9 @@ class MainWindow(QMainWindow):
         self.export_panel.set_build_available(False)
         self.export_panel.combine_requested.connect(self._start_combine)
         self.export_panel.export_requested.connect(self._start_export)
+        self.export_panel.audit_requested.connect(self._start_face_audit)
+        self.export_panel.audit_review_requested.connect(self._review_faces)
+        self.export_panel.audit_settings_changed.connect(self._face_settings_changed)
         self.preview = PreviewPanel()
         self.preview.show_satellite.setEnabled(satellite_builder is not None)
         self.preview.satellite_view.builder = satellite_builder
@@ -231,11 +238,19 @@ class MainWindow(QMainWindow):
         self.coordinate_panel.snap_requested.connect(self._start_outlets)
         self.coordinate_panel.snap_button.setEnabled(outlet_use_case is not None)
         self.crossing_panel.invalidated.connect(self.coordinate_panel.invalidate)
+        self.crossing_panel.invalidated.connect(self._clear_point_review)
+        self.preview.point_review.role_requested.connect(self._assign_point_role)
+        self.crossing_panel.role_change_requested.connect(
+            self._assign_table_point_role, Qt.ConnectionType.QueuedConnection,
+        )
+        self.preview.raster_background_requested.connect(self._restore_raster_background)
+        self.preview.point_review.undo_requested.connect(self._undo_point_review)
+        self.preview.point_review.inlet_requested.connect(self._add_inlet_point)
         tabs = QTabWidget()
         tabs.addTab(self.inputs, "Terrain input")
         tabs.addTab(self.export_panel, "DEM / GeoTIFF")
         tabs.addTab(self.crossing_panel, "Highway / culvert crossings")
-        tabs.addTab(self.coordinate_panel, "Outlet coordinate validation")
+        tabs.addTab(self.coordinate_panel, "Inlet validation & pour points")
         self.hydrology_panel = HydrologyPanel()
         self.hydrology_panel.setEnabled(hydrology_use_case is not None)
         self.hydrology_panel.run_requested.connect(self._start_hydrology)
@@ -289,6 +304,9 @@ class MainWindow(QMainWindow):
         self.open_raster_button.setEnabled(False)
         self.preview.earth_button.setEnabled(False)
         self.hydrology_panel.setEnabled(False)
+        self.export_panel.setEnabled(False)
+        self.preview.point_review.setEnabled(False)
+        self.preview.drainage_view.editing_enabled = False
         self.task_progress.begin(self.status.text())
 
     def _choose_raster(self) -> None:
@@ -332,6 +350,7 @@ class MainWindow(QMainWindow):
         self.coordinate_panel.accumulation_path.clear()
         self.active_raster = raster
         self.dataset = None
+        self.export_panel.show_face_status(None)
         self.export_panel.set_build_available(False)
         self.working_crs.blockSignals(True)
         self.working_crs.setText(raster.crs)
@@ -356,7 +375,7 @@ class MainWindow(QMainWindow):
             self.preview.drainage_view.clear()
             self.preview.drainage_info.setText("Compute crossings to populate Drainage View.")
         else:
-            self.preview.drainage_view.show_result(self.crossing_panel.result)
+            self.preview.drainage_view.show_result(self.crossing_panel.result, preserve_camera=True)
             self.preview.drainage_info.setText(
                 "Crossings retained; prepare outlets for these inputs."
             )
@@ -364,6 +383,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _invalidate(self) -> None:
         self.dataset = None
+        self.export_panel.show_face_status(None)
         if self.active_raster is None:
             self.preview.clear_terrain()
         self.export_panel.set_build_available(False)
@@ -475,6 +495,7 @@ class MainWindow(QMainWindow):
             ),
             self.working_crs.text().strip(),
             _SUPPLIED_ELEVATIONS,
+            face_options=self.export_panel.face_options(),
         )
         self._invalidate()
         self.inputs.setEnabled(False)
@@ -500,7 +521,12 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _show_result(self, dataset: TerrainDataset) -> None:
+        if self._closing or self._cancel.is_set():
+            return
         self.dataset = dataset
+        if dataset.face_audit is not None:
+            self.export_panel.set_face_options(dataset.face_audit.options)
+        self.export_panel.show_face_status(dataset)
         if self.active_raster is None:
             self.working_crs.blockSignals(True)
             self.working_crs.setText(dataset.crs_wkt)
@@ -529,7 +555,55 @@ class MainWindow(QMainWindow):
         ]
         if len(dataset.issues) > 500:
             lines.append("Showing the first 500 findings; the full report remains in memory.")
+        if dataset.face_audit is not None:
+            audit = dataset.face_audit
+            lines.append(audit.summary())
+            if audit.blocked:
+                try:
+                    audit.require_ready()
+                except ValueError as exc:
+                    lines.append(str(exc))
+                self.status.setText(audit.summary() + " Open DEM / GeoTIFF > Review face overlaps.")
         self.report.setPlainText("\n".join(lines) if lines else "No validation findings.")
+
+    @Slot()
+    def _face_settings_changed(self) -> None:
+        if self.dataset is not None:
+            self.dataset = replace(self.dataset, face_audit=None)
+        self.export_panel.show_face_status(self.dataset)
+
+    @Slot()
+    def _review_faces(self) -> None:
+        if self.dataset is not None and self.dataset.face_audit is not None:
+            FaceReviewDialog(self.dataset.face_audit, self.dataset.crs_label, self).exec()
+
+    @Slot()
+    def _start_face_audit(self) -> None:
+        if self.dataset is None or self._use_case is None or self._thread is not None:
+            return
+        self.dataset = replace(self.dataset, face_audit=None)
+        self.export_panel.show_face_status(self.dataset)
+        for panel in (self.inputs, self.crossing_panel, self.coordinate_panel):
+            panel.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.status.setText("Checking face overlaps before DEM construction...")
+        self._cancel = Event()
+        thread = QThread(self)
+        worker = FaceAuditWorker(
+            self._use_case, self.dataset, self.export_panel.face_options(), self._cancel,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._show_result)
+        worker.failed.connect(self._show_error)
+        worker.progress.connect(self._dem_progress)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        self._begin_task()
+        thread.start()
 
     @Slot(str)
     def _show_error(self, message: str) -> None:
@@ -645,6 +719,8 @@ class MainWindow(QMainWindow):
             self.crossing_panel.working_crs.setText(self.active_raster.crs)
         try:
             request = self.crossing_panel.request()
+            if self.active_raster is not None:
+                request = replace(request, raster_bounds=self.active_raster.preview.bounds)
         except ValueError as exc:
             self._show_error(str(exc))
             return
@@ -676,6 +752,9 @@ class MainWindow(QMainWindow):
     def _show_crossings(self, result: CrossingResult) -> None:
         self.coordinate_panel.invalidate()
         self.crossing_panel.show_result(result)
+        self._restore_raster_background()
+        self._point_review = PointReview(result)
+        self.preview.point_review.show_result(result)
         self.preview.mode.setCurrentIndex(1)
         self.preview.drainage_info.setText(self.crossing_panel.summary.text())
         self.status.setText(self.crossing_panel.summary.text())
@@ -684,11 +763,82 @@ class MainWindow(QMainWindow):
             + (f" Related: {issue.related.label}" if issue.related else "")
             for issue in result.issues[:500]
         ]
+        lines[:0] = [
+            f"{label}: {source.path.name} — {source.unit_summary}"
+            for label, source in (("Highway", result.highway_source),
+                                  ("Culverts", result.culvert_source))
+            if source is not None and source.unit_summary
+        ]
         if len(result.issues) > 500:
             lines.append("Showing first 500 findings; all findings are retained in the result.")
         self.report.setPlainText(
             "\n".join(lines) if lines else "No extraction or overlap findings."
         )
+
+    def _clear_point_review(self) -> None:
+        self._point_review = None
+        self.preview.point_review.show_result(None)
+
+    def _refresh_point_review(self) -> None:
+        if self._point_review is None:
+            return
+        self.preview.show_satellite.setChecked(False)
+        selected = self.preview.drainage_view.selected_ids.copy()
+        self.crossing_panel.result = self._point_review.result
+        self.coordinate_panel.invalidate()
+        self.crossing_panel.show_result(self._point_review.result, preserve_camera=True)
+        self.preview.point_review.show_result(
+            self._point_review.result, can_undo=self._point_review.can_undo,
+        )
+        self.preview.drainage_view.set_selected(selected)
+        self.status.setText("Point roles updated. Re-select inlet pour points before catchments.")
+
+    def _assign_point_role(self, role: PointRole) -> None:
+        if self._thread is None and self._point_review is not None:
+            previous = self._point_review.result
+            self._point_review.assign(self.preview.drainage_view.selected_ids, role)
+            if self._point_review.result is not previous:
+                self._refresh_point_review()
+
+    @Slot(str, object)
+    def _assign_table_point_role(self, identifier: str, role: PointRole) -> None:
+        if self._thread is not None or self._point_review is None:
+            return
+        previous = self._point_review.result
+        self._point_review.assign({identifier}, role)
+        if self._point_review.result is not previous:
+            self._refresh_point_review()
+
+    @Slot()
+    def _restore_raster_background(self) -> None:
+        raster = self.active_raster
+        if raster is None:
+            return
+        current = self.coordinate_panel.dem_path.text().strip()
+        if not current or Path(current).resolve() != raster.path.resolve():
+            return
+        view = self.preview.drainage_view
+        if view.snapshot is None or view.snapshot.path.resolve() != raster.path.resolve():
+            view.set_raster(raster.preview, preserve_camera=True)
+        self.preview.show_raster_background.setEnabled(True)
+        view.set_raster_visible(self.preview.show_raster_background.isChecked())
+
+    def _undo_point_review(self) -> None:
+        if self._thread is None and self._point_review is not None:
+            self._point_review.undo()
+            self._refresh_point_review()
+
+    def _add_inlet_point(self, x: float, y: float, culvert: str) -> None:
+        if self._thread is not None or self._point_review is None:
+            return
+        try:
+            identifier = self._point_review.add_inlet(x, y, culvert)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
+        self._refresh_point_review()
+        self.preview.drainage_view.set_selected({identifier})
+        self.preview.point_review.tool.setCurrentIndex(1)
 
     @Slot()
     def _start_coordinates(self) -> None:
@@ -699,6 +849,11 @@ class MainWindow(QMainWindow):
         path = self.coordinate_panel.dem_path.text().strip()
         if crossings is None or not path:
             self._show_error("Compute crossings and select a DEM before coordinate validation.")
+            return
+        try:
+            crossings = inlet_candidates(crossings)
+        except ValueError as exc:
+            self._show_error(str(exc))
             return
         self.inputs.setEnabled(False)
         self.export_panel.setEnabled(False)
@@ -745,7 +900,7 @@ class MainWindow(QMainWindow):
             self._show_error("Compute crossing candidates before selecting pour points.")
             return
         try:
-            request = self.coordinate_panel.snap_request(crossings)
+            request = self.coordinate_panel.snap_request(inlet_candidates(crossings))
         except ValueError as exc:
             self._show_error(str(exc))
             return
@@ -774,7 +929,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _show_outlets(self, result: SnapResult) -> None:
-        self.coordinate_panel.show_snapping(result)
+        self.coordinate_panel.show_snapping(result, self.crossing_panel.result)
         self.preview.mode.setCurrentIndex(1)
         accepted = sum(s.pour_point is not None for s in result.outlets)
         self.preview.drainage_info.setText(
@@ -947,6 +1102,10 @@ class MainWindow(QMainWindow):
         if prepared is None:
             self._show_error("Prepare pour points before catchment delineation.")
             return
+        if any(o.original.point.role != PointRole.INLET for o in prepared.outlets):
+            self._show_error("Only classified culvert inlets may be used for catchments. "
+                             "Mark inlets and select inlet pour points again.")
+            return
         try:
             request = self.hydrology_panel.request(prepared)
             if request.output.exists():
@@ -1022,6 +1181,8 @@ class MainWindow(QMainWindow):
         self.preview.earth_button.setEnabled(self._earth_writer is not None)
         self._thread = None
         self._worker = None
+        self.preview.point_review.setEnabled(True)
+        self.preview.drainage_view.editing_enabled = True
         self.inputs.setEnabled(True)
         self.crossing_panel.setEnabled(self._crossing_use_case is not None)
         self.coordinate_panel.setEnabled(
@@ -1032,6 +1193,7 @@ class MainWindow(QMainWindow):
         self.export_panel.set_build_available(
             self.dataset is not None and self._dem_use_case is not None
         )
+        self.export_panel.show_face_status(self.dataset)
         self.cancel_button.setEnabled(False)
         self._satellite_timer.start()
         if self._closing:

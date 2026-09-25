@@ -7,6 +7,7 @@ from pytestqt.qtbot import QtBot
 from highway_drainage.application.coordinates import ValidateCoordinates
 from highway_drainage.infrastructure.coordinates import RasterCoordinateInspector
 from highway_drainage.presentation.main_window import MainWindow
+from tests.support.coordinates import as_inlets
 from tests.support.outlets import request, service
 
 
@@ -16,7 +17,7 @@ def test_gui_outlet_selection_map_and_invalidation(qtbot: QtBot, tmp_path: Path)
     window = MainWindow(coordinate_use_case=validator, outlet_use_case=service())
     qtbot.addWidget(window)
     panel = window.coordinate_panel
-    window.crossing_panel.show_result(base.coordinates.crossings)
+    window.crossing_panel.show_result(as_inlets(base.coordinates.crossings))
     panel.dem_path.setText(str(base.coordinates.dem))
     panel.snap_distance.setText("2")
     panel.snap_button.click()

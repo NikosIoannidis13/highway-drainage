@@ -99,6 +99,8 @@ class ShapefilePointWriter:
                         writer.field(name, "C", size=254)
                     for name in ("x", "y", "orig_x", "orig_y", "elevation", "snap_m", "flow_acc"):
                         writer.field(name, "N", size=24, decimal=8)
+                    writer.field("culv_role", "C", size=16)
+                    writer.field("manual", "L")
                     for point in request.points:
                         if cancel.is_set():
                             raise ImportCancelled()
@@ -125,6 +127,8 @@ class ShapefilePointWriter:
                             point.status,
                             point.accumulation_units,
                             *numbers,
+                            point.culvert_role,
+                            point.manual,
                         )
             stage.with_suffix(".prj").write_text(crs.to_wkt(version="WKT1_ESRI"), encoding="utf-8")
             stage.with_suffix(".cpg").write_text("UTF-8", encoding="ascii")

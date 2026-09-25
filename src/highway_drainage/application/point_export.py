@@ -24,6 +24,8 @@ class ExportPoint:
     distance: float | None = None
     accumulation: float | None = None
     accumulation_units: str = ""
+    culvert_role: str = "unclassified"
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,7 +85,8 @@ def crossing_export(result: CrossingResult, path: Path) -> PointExport:
         path,
         result.crs_wkt,
         tuple(
-            ExportPoint(p.identifier, "crossing", p.x, p.y, "candidate", p.x, p.y)
+            ExportPoint(p.identifier, "crossing", p.x, p.y, "candidate", p.x, p.y,
+                        culvert_role=p.role.value, manual=p.manual)
             for p in result.points
         ),
     )
@@ -103,6 +106,8 @@ def outlet_export(result: SnapResult, path: Path) -> PointExport:
             p.distance,
             p.accumulation,
             result.request.accumulation_units if p.accumulation is not None else "",
+            culvert_role=o.original.point.role.value,
+            manual=o.original.point.manual,
         )
         for o in result.outlets
         if o.status != "rejected" and (p := o.pour_point) is not None

@@ -5,7 +5,7 @@ from threading import Event
 from PySide6.QtCore import QObject, Signal, Slot
 
 from highway_drainage.application.terrain import ImportCancelled, ImportTerrain
-from highway_drainage.domain.terrain import TerrainRequest
+from highway_drainage.domain.terrain import FaceAuditOptions, TerrainDataset, TerrainRequest
 
 
 class TerrainWorker(QObject):
@@ -28,6 +28,34 @@ class TerrainWorker(QObject):
             )
         except ImportCancelled:
             self.failed.emit("Import cancelled.")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class FaceAuditWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+    progress = Signal(str)
+
+    def __init__(
+        self, use_case: ImportTerrain, dataset: TerrainDataset,
+        options: FaceAuditOptions, cancel: Event,
+    ) -> None:
+        super().__init__()
+        self._use_case, self._dataset = use_case, dataset
+        self._options, self._cancel = options, cancel
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self._use_case.audit_faces(
+                self._dataset, self._options, self._cancel, self.progress.emit,
+            ))
+        except ImportCancelled:
+            self.failed.emit("Face audit cancelled. Recheck faces before building.")
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:

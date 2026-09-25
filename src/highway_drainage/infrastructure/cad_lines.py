@@ -1,6 +1,7 @@
 """Bounded CAD-to-line conversion with OCS and nested INSERT transformations."""
 
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
 from math import asin, ceil, isfinite, radians, sqrt
 from threading import Event
 
@@ -106,7 +107,10 @@ class CadLineReader:
             raise ValueError(f"Cannot read {source.path.name}: {exc}") from exc
         file_ref = CadReference(source.path, "", "", "FILE")
         issues: list[CrossingIssue] = []
-        frame = cad_frame(document, source.path, source.crs, source.fallback_crs)
+        frame = cad_frame(document, source.path, source.crs, source.fallback_crs, source.units)
+        source = replace(
+            source, crs=source.crs.strip() or frame.crs.to_wkt(), unit_summary=frame.unit_summary,
+        )
         if frame.assumed:
             issues.append(
                 CrossingIssue(
@@ -127,8 +131,6 @@ class CadLineReader:
                 )
                 * frame.crs.axis_info[0].unit_conversion_factor
             )
-        if not source.crs.strip():
-            source = LineSource(source.path, frame.crs.to_wkt(), source.layers)
         if int(document.units) == 0:
             issues.append(
                 CrossingIssue(

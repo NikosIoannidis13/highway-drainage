@@ -19,8 +19,11 @@ def test_contour_role_and_export_controls(qtbot: QtBot, tmp_path: Path) -> None:
     panel.contour_spacing.setText("2")
     panel.max_contour_edge.setText("50")
     panel.sample_coverage.setCurrentIndex(1)
-    request = panel.request(plane(tmp_path))
+    dataset = plane(tmp_path)
+    assert dataset.face_audit is not None
+    panel.set_face_options(dataset.face_audit.options)
+    request = panel.request(dataset)
     assert request.contour_spacing == 2 and request.max_contour_edge == 50
     assert request.sample_coverage == "convex_hull"
     panel.contour_spacing.clear()
-    assert panel.request(plane(tmp_path)).contour_spacing is None
+    assert panel.request(dataset).contour_spacing is None
